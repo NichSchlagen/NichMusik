@@ -22,7 +22,7 @@ export function buildActionEmbed({ title, description, emoji, footer }) {
 }
 
 export function buildQueuedEmbed(trackLabel, queuePosition) {
-  const description = ["✅ Zur Queue hinzugefügt:", `> **${trackLabel}**`];
+  const description = ["✅ Zur Queue hinzugefügt:", `> ${trackLabel}`];
 
   if (queuePosition) {
     description.push(`Position in der Queue: **#${queuePosition}**`);
