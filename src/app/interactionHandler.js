@@ -6,9 +6,9 @@ import { log, errToObj } from "../utils/logger.js";
 import { CONTROL_ACTIONS } from "./constants.js";
 import {
   buildActionEmbed,
+  buildQueuedEmbed,
   buildNowPlayingEmbed,
   buildQueueEmbed,
-  buildQueuedEmbed,
 } from "./embeds.js";
 
 function isVoiceJoinTimeout(e) {
@@ -70,6 +70,50 @@ function canJoinVoice(interaction, vc) {
 
 function replyEphemeral(interaction, content) {
   return interaction.reply({ content, flags: EPHEMERAL });
+}
+
+// Merkt sich den letzten öffentlich gesendeten Status-Post je Guild ("Track hinzugefügt", "Voice beigetreten"),
+// damit beim nächsten Status der alte gelöscht wird und der Channel sauber bleibt.
+const lastStatusMessages = new Map();
+const lastStatusTimers = new Map();
+const LEAVE_STATUS_TTL_MS = 30_000;
+
+function clearStatusTimer(guildId) {
+  const timer = lastStatusTimers.get(guildId);
+  if (timer) clearTimeout(timer);
+  lastStatusTimers.delete(guildId);
+}
+
+async function deleteLastStatusMessage(client, guildId) {
+  const last = lastStatusMessages.get(guildId);
+  clearStatusTimer(guildId);
+  if (!client || !last?.channelId || !last?.messageId) return;
+
+  try {
+    const channel =
+      client.channels?.cache?.get(last.channelId) || (await client.channels?.fetch?.(last.channelId));
+    if (!channel?.messages?.fetch) return;
+
+    const msg = await channel.messages.fetch(last.messageId).catch(() => null);
+    if (!msg) return;
+
+    if (msg.deletable) await msg.delete().catch(() => {});
+  } catch (e) {
+    log("warn", "[Slash] Failed to delete last status message", { guildId, err: errToObj(e) });
+  } finally {
+    lastStatusMessages.delete(guildId);
+  }
+}
+
+function rememberStatusMessage(guildId, message, client, ttlMs) {
+  if (!guildId || !message?.id || !message?.channelId) return;
+  clearStatusTimer(guildId);
+  lastStatusMessages.set(guildId, { channelId: message.channelId, messageId: message.id });
+
+  if (ttlMs && client) {
+    const timer = setTimeout(() => deleteLastStatusMessage(client, guildId), ttlMs);
+    lastStatusTimers.set(guildId, timer);
+  }
 }
 
 function ensureCommandOnGuild(interaction) {
@@ -163,7 +207,9 @@ async function handleJoin(interaction, ctx, musicService) {
     return replyEphemeral(interaction, describeUserFacingFailure(joinResult, "join"));
   }
 
-  return interaction.reply({
+  await deleteLastStatusMessage(interaction.client, interaction.guildId);
+
+  await interaction.reply({
     embeds: [
       buildActionEmbed({
         title: "Voice beigetreten",
@@ -172,6 +218,11 @@ async function handleJoin(interaction, ctx, musicService) {
       }),
     ],
   });
+
+  const message = await interaction.fetchReply().catch(() => null);
+  rememberStatusMessage(interaction.guildId, message, interaction.client);
+
+  return message;
 }
 
 async function handlePlay(interaction, ctx, musicService) {
@@ -209,11 +260,15 @@ async function handlePlay(interaction, ctx, musicService) {
 
   const label = result.display || `**${result.title || "Unbekannt"}**`;
 
+  await deleteLastStatusMessage(interaction.client, interaction.guildId);
+
   if (!result.queued) {
     return interaction.deleteReply().catch(() => {});
   }
 
-  return interaction.editReply({ embeds: [buildQueuedEmbed(label, result.queuePosition)] });
+  const message = await interaction.editReply({ embeds: [buildQueuedEmbed(label, result.queuePosition)] });
+  rememberStatusMessage(interaction.guildId, message, interaction.client);
+  return message;
 }
 
 async function handleSkip(interaction, ctx, musicService) {
@@ -234,6 +289,8 @@ async function handleSkip(interaction, ctx, musicService) {
 async function handleLeave(interaction, ctx, musicService) {
   log("info", "[Slash] leave", ctx);
 
+  await deleteLastStatusMessage(interaction.client, interaction.guildId);
+
   const res = await musicService.leave({ guildId: interaction.guildId });
   if (!res.ok && res.reason === "NO_PLAYER") {
     return replyEphemeral(interaction, "Ich bin nicht im Voice.");
@@ -242,15 +299,20 @@ async function handleLeave(interaction, ctx, musicService) {
     throw new Error("No disconnect method found (player.disconnect / shoukaku.leaveVoiceChannel).");
   }
 
-  return interaction.reply({
-    embeds: [
-      buildActionEmbed({
-        title: "Voice verlassen",
-        emoji: "🛑",
-        description: "Playback gestoppt, Queue geleert und Voice verlassen. Bis bald!",
-      }),
-    ],
-  });
+  const message = await interaction
+    .reply({
+      embeds: [
+        buildActionEmbed({
+          title: "Voice verlassen",
+          emoji: "🛑",
+          description: "Playback gestoppt, Queue geleert und Voice verlassen. Bis bald!",
+        }),
+      ],
+    })
+    .then(() => interaction.fetchReply().catch(() => null));
+
+  rememberStatusMessage(interaction.guildId, message, interaction.client, LEAVE_STATUS_TTL_MS);
+  return message;
 }
 
 function handleQueue(interaction, _ctx, musicService) {

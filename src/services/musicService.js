@@ -19,7 +19,13 @@ import { CONTROL_ACTIONS } from "../app/constants.js";
 import { buildNowPlayingEmbed } from "../app/embeds.js";
 
 // Zustand je Guild in Maps halten, damit der Service instanzlos genutzt werden kann.
-const queues = new Map(); // guildId -> { items: Array<{ encoded, info }>, playing: boolean, announceChannelId?: string | null }
+// guildId -> {
+//   items: Array<{ encoded, info }>;
+//   playing: boolean;
+//   announceChannelId?: string | null;
+//   lastAnnounceMessage?: { channelId: string, messageId: string } | null;
+// }
+const queues = new Map();
 const nowPlaying = new Map(); // guildId -> string title
 const idleTimers = new Map(); // guildId -> Timeout
 
@@ -31,9 +37,28 @@ function getQueue(guildId) {
   let q = queues.get(guildId);
   if (q) return q;
 
-  const created = { items: [], playing: false, announceChannelId: null };
+  const created = { items: [], playing: false, announceChannelId: null, lastAnnounceMessage: null };
   queues.set(guildId, created);
   return created;
+}
+
+async function deleteLastAnnouncement(client, queue) {
+  const last = queue?.lastAnnounceMessage;
+  if (!client || !last?.channelId || !last?.messageId) return;
+
+  try {
+    const channel = client.channels?.cache?.get(last.channelId) || (await client.channels?.fetch?.(last.channelId));
+    if (!channel?.messages?.fetch) return;
+
+    const message = await channel.messages.fetch(last.messageId).catch(() => null);
+    if (!message) return;
+
+    if (message.deletable) await message.delete().catch(() => {});
+  } catch (e) {
+    log("warn", "[Music] Failed to delete old announcement", { err: errToObj(e), channelId: last?.channelId });
+  } finally {
+    if (queue) queue.lastAnnounceMessage = null;
+  }
 }
 
 function buildNowPlayingControls(guildId) {
@@ -68,19 +93,27 @@ function buildNowPlayingControls(guildId) {
   return [row];
 }
 
-async function announceNowPlaying(client, channelId, description, guildId) {
-  if (!client || !channelId) return;
+async function announceNowPlaying(client, queue, description, guildId) {
+  if (!client || !queue?.announceChannelId) return;
 
   try {
-    const channel = client.channels?.cache?.get(channelId) || (await client.channels?.fetch?.(channelId));
+    await deleteLastAnnouncement(client, queue);
+
+    const channel =
+      client.channels?.cache?.get(queue.announceChannelId) || (await client.channels?.fetch?.(queue.announceChannelId));
     if (!channel?.send) return;
 
-    await channel.send({
+    const message = await channel.send({
       embeds: [buildNowPlayingEmbed(description)],
       components: buildNowPlayingControls(guildId),
     });
+
+    queue.lastAnnounceMessage = { channelId: channel.id, messageId: message.id };
   } catch (e) {
-    log("warn", "[Music] Failed to announce now playing", { channelId, err: errToObj(e) });
+    log("warn", "[Music] Failed to announce now playing", {
+      channelId: queue?.announceChannelId,
+      err: errToObj(e),
+    });
   }
 }
 
@@ -151,6 +184,7 @@ function scheduleAutoLeave(shoukaku, guildId, ms = AUTO_LEAVE_MS || 120000) {
             nowPlaying.delete(guildId);
             q.items = [];
             q.announceChannelId = null;
+            q.lastAnnounceMessage = null;
 
             if (typeof player.disconnect === "function") await player.disconnect();
             else await shoukaku.leaveVoiceChannel?.(guildId);
@@ -167,6 +201,7 @@ function scheduleAutoLeave(shoukaku, guildId, ms = AUTO_LEAVE_MS || 120000) {
           nowPlaying.delete(guildId);
           q.items = [];
           q.announceChannelId = null;
+          q.lastAnnounceMessage = null;
 
           log("info", "[Music] Leaving idle voice channel", { guildId });
           if (typeof player.disconnect === "function") await player.disconnect();
@@ -183,15 +218,17 @@ function resetQueueState(guildId) {
   const q = getQueue(guildId);
   q.items = [];
   q.announceChannelId = null;
+  q.lastAnnounceMessage = null;
   nowPlaying.delete(guildId);
   return q;
 }
 
-function handleQueueFinished(shoukaku, guildId) {
+async function handleQueueFinished(shoukaku, client, guildId) {
   nowPlaying.delete(guildId);
 
   const q = getQueue(guildId);
   q.announceChannelId = null;
+  await deleteLastAnnouncement(client, q);
 
   log("info", "[Music] Queue finished", { guildId });
   scheduleAutoLeave(shoukaku, guildId);
@@ -208,7 +245,7 @@ async function playNext(shoukaku, client, guildId) {
       if (!player) {
         nowPlaying.delete(guildId);
         if (q.items.length === 0) {
-          handleQueueFinished(shoukaku, guildId);
+          await handleQueueFinished(shoukaku, client, guildId);
         }
         log("warn", "[Music] Missing player while advancing queue", { guildId, queueLength: q.items.length });
         return;
@@ -217,7 +254,7 @@ async function playNext(shoukaku, client, guildId) {
       const next = q.items.shift();
       if (!next) {
         // nichts mehr zu spielen -> Auto-Leave starten
-        handleQueueFinished(shoukaku, guildId);
+        await handleQueueFinished(shoukaku, client, guildId);
         return;
       }
 
@@ -228,7 +265,7 @@ async function playNext(shoukaku, client, guildId) {
       nowPlaying.set(guildId, description);
       log("info", "[Music] Now playing", { guildId, track: description });
       if (q.announceChannelId) {
-        await announceNowPlaying(client, q.announceChannelId, description, guildId);
+        await announceNowPlaying(client, q, description, guildId);
       }
 
       try {
@@ -382,6 +419,7 @@ export function createMusicService(shoukaku, client) {
 
       clearIdleTimer(guildId);
 
+      await deleteLastAnnouncement(client, getQueue(guildId));
       resetQueueState(guildId);
 
       if (typeof player.disconnect === "function") {
@@ -424,6 +462,7 @@ export function createMusicService(shoukaku, client) {
       const player = getExistingPlayer(shoukaku, guildId);
       if (!player) return { ok: false, reason: "NO_PLAYER" };
 
+      await deleteLastAnnouncement(client, getQueue(guildId));
       resetQueueState(guildId);
 
       await stopPlayer(player);
