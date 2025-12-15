@@ -41,7 +41,7 @@ export function buildNowPlayingEmbed(trackLabel) {
     .setTitle("🎧 Jetzt läuft")
     .setDescription(
       [
-        `> **${trackLabel}**`,
+        `> ${trackLabel}`,
         "",
         "Steuerung: **/skip**, **/pause**, **/stop**",
       ].join("\n")
