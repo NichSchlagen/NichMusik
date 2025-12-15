@@ -4,7 +4,6 @@ import {
   mustGetNode,
   getExistingPlayer,
   joinOrGetPlayer,
-  extractTracksFromResolve,
   extractEncoded,
   extractInfo,
   playEncoded,
@@ -240,7 +239,12 @@ async function playNext(shoukaku, client, guildId) {
   q.playing = true;
 
   try {
-    while (true) {
+    if (q.items.length === 0 && !nowPlaying.has(guildId)) {
+      await handleQueueFinished(shoukaku, client, guildId);
+      return;
+    }
+
+    while (q.items.length > 0 || nowPlaying.has(guildId)) {
       const player = getExistingPlayer(shoukaku, guildId);
       if (!player) {
         nowPlaying.delete(guildId);
@@ -342,7 +346,6 @@ export function createMusicService(shoukaku, client) {
       const joinResult = await this.join({ guildId, channelId, shardId, deaf });
       if (!joinResult.ok) return joinResult;
 
-      const player = joinResult.player;
       const node = mustGetNode(shoukaku);
 
       let resolution;
