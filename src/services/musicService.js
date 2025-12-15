@@ -312,7 +312,7 @@ export function createMusicService(shoukaku, client) {
       const q = getQueue(guildId);
       if (textChannelId) q.announceChannelId = textChannelId;
 
-      const busy = Boolean(player.track) || q.items.length > 0;
+      const busy = nowPlaying.has(guildId) || q.items.length > 0;
       q.items.push({ encoded, info });
 
       if (busy) {
