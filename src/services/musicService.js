@@ -128,26 +128,49 @@ function scheduleAutoLeave(shoukaku, guildId, ms = AUTO_LEAVE_MS || 120000) {
     guildId,
     setTimeout(async () => {
       try {
-        const player = getExistingPlayer(shoukaku, guildId);
-        if (!player) return;
-
         const q = getQueue(guildId);
 
-        // Nur leaven, wenn wirklich idle:
-        // - Queue leer
-        // - und aktuell kein Track
-        if (q.items.length === 0 && !player.track) {
-          // Queue/NowPlaying aufräumen
+        // noch etwas aktiv oder queued -> nicht idle
+        if (nowPlaying.has(guildId)) return;
+        if (q.items.length > 0) return;
+
+        const player = getExistingPlayer(shoukaku, guildId);
+
+        // Player kann bereits weg sein -> trotzdem Voice verlassen
+        if (!player) {
+          await shoukaku.leaveVoiceChannel?.(guildId);
+          return;
+        }
+
+        // Lavalink v4: player.track ist oft stale -> nicht benutzen
+        const paused = player.paused === true;
+
+        // falls keine Positionsdaten vorhanden sind
+        if (typeof player.position !== "number") {
+          if (!paused) {
+            nowPlaying.delete(guildId);
+            q.items = [];
+            q.announceChannelId = null;
+
+            if (typeof player.disconnect === "function") await player.disconnect();
+            else await shoukaku.leaveVoiceChannel?.(guildId);
+          }
+          return;
+        }
+
+        // bewegt sich die Position noch?
+        const pos1 = player.position;
+        await new Promise((r) => setTimeout(r, 1500));
+        const pos2 = getExistingPlayer(shoukaku, guildId)?.position ?? pos1;
+
+        if (!paused && pos2 <= pos1) {
           nowPlaying.delete(guildId);
           q.items = [];
+          q.announceChannelId = null;
 
           log("info", "[Music] Leaving idle voice channel", { guildId });
-
-          if (typeof player.disconnect === "function") {
-            await player.disconnect();
-          } else if (typeof shoukaku.leaveVoiceChannel === "function") {
-            await shoukaku.leaveVoiceChannel(guildId);
-          }
+          if (typeof player.disconnect === "function") await player.disconnect();
+          else await shoukaku.leaveVoiceChannel?.(guildId);
         }
       } finally {
         idleTimers.delete(guildId);
