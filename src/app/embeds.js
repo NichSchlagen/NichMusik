@@ -36,17 +36,24 @@ export function buildQueuedEmbed(trackLabel, queuePosition) {
     .setFooter({ text: "Tipp: /nowplaying zeigt den aktuellen Track." });
 }
 
-export function buildNowPlayingEmbed(trackLabel) {
-  return baseEmbed()
+export function buildNowPlayingEmbed(track) {
+  const label = typeof track === "string" ? track : track?.label || "Unbekannt";
+  const artworkUrl = typeof track === "object" ? track?.artworkUrl : null;
+
+  const embed = baseEmbed()
     .setTitle("🎧 Jetzt läuft")
     .setDescription(
       [
-        `> ${trackLabel}`,
+        `> ${label}`,
         "",
         "Steuerung: **/skip**, **/pause**, **/stop**",
       ].join("\n")
     )
     .setFooter({ text: "NichMusik" });
+
+  if (artworkUrl) embed.setThumbnail(artworkUrl);
+
+  return embed;
 }
 
 export function buildQueueEmbed(snapshot) {

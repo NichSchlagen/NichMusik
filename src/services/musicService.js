@@ -25,7 +25,7 @@ import { buildNowPlayingEmbed } from "../app/embeds.js";
 //   lastAnnounceMessage?: { channelId: string, messageId: string } | null;
 // }
 const queues = new Map();
-const nowPlaying = new Map(); // guildId -> string title
+const nowPlaying = new Map(); // guildId -> { label: string, artworkUrl?: string }
 const idleTimers = new Map(); // guildId -> Timeout
 
 function buildFailure(reason, err, extra = {}) {
@@ -92,7 +92,7 @@ function buildNowPlayingControls(guildId) {
   return [row];
 }
 
-async function announceNowPlaying(client, queue, description, guildId) {
+async function announceNowPlaying(client, queue, nowPlayingInfo, guildId) {
   if (!client || !queue?.announceChannelId) return;
 
   try {
@@ -103,7 +103,7 @@ async function announceNowPlaying(client, queue, description, guildId) {
     if (!channel?.send) return;
 
     const message = await channel.send({
-      embeds: [buildNowPlayingEmbed(description)],
+      embeds: [buildNowPlayingEmbed(nowPlayingInfo)],
       components: buildNowPlayingControls(guildId),
     });
 
@@ -143,6 +143,21 @@ function describeTrack(info) {
   if (duration) parts.push(`(${duration})`);
 
   return parts.join(" — ");
+}
+
+function findArtwork(info) {
+  const artwork = info?.artworkUrl || info?.artwork_url || info?.thumbnail;
+  if (typeof artwork === "string") return artwork;
+  if (typeof artwork?.url === "string") return artwork.url;
+
+  const source = info?.sourceName || info?.source || "";
+  const id = info?.identifier;
+
+  if (id && source.toLowerCase().includes("youtube")) {
+    return `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+  }
+
+  return null;
 }
 
 function clearIdleTimer(guildId) {
@@ -266,10 +281,13 @@ async function playNext(shoukaku, client, guildId) {
       clearIdleTimer(guildId);
 
       const description = describeTrack(next.info);
-      nowPlaying.set(guildId, description);
+      const artworkUrl = findArtwork(next.info);
+      const trackMeta = { label: description, artworkUrl };
+
+      nowPlaying.set(guildId, trackMeta);
       log("info", "[Music] Now playing", { guildId, track: description });
       if (q.announceChannelId) {
-        await announceNowPlaying(client, q, description, guildId);
+        await announceNowPlaying(client, q, trackMeta, guildId);
       }
 
       try {
@@ -484,10 +502,12 @@ export function createMusicService(shoukaku, client) {
 
       const info = extractInfo(current);
       const label = describeTrack(info);
+      const artworkUrl = findArtwork(info);
+      const trackMeta = { label, artworkUrl };
 
       // Cache for subsequent calls to keep behavior consistent.
-      nowPlaying.set(guildId, label);
-      return { ok: true, track: label };
+      nowPlaying.set(guildId, trackMeta);
+      return { ok: true, track: trackMeta };
     },
 
     // -------- /queue support --------
@@ -495,7 +515,7 @@ export function createMusicService(shoukaku, client) {
     getQueueSnapshot({ guildId }) {
       const q = getQueue(guildId);
       return {
-        nowPlaying: nowPlaying.get(guildId) || null,
+        nowPlaying: nowPlaying.get(guildId)?.label || null,
         items: q.items.map((x) => describeTrack(x.info)),
       };
     },
