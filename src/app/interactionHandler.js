@@ -1,6 +1,6 @@
 // src/app/interactionHandler.js
 // Zentrales Routing der Slash-Commands und Schutz vor typischen Voice-Fehlern.
-import { Events, PermissionsBitField } from "discord.js";
+import { ActionRowBuilder, Events, PermissionsBitField, StringSelectMenuBuilder } from "discord.js";
 import { EPHEMERAL } from "../config/index.js";
 import { log, errToObj } from "../utils/logger.js";
 import { CONTROL_ACTIONS } from "./constants.js";
@@ -258,6 +258,45 @@ async function handlePlay(interaction, ctx, musicService) {
     });
   }
 
+  if (result.needsSelection && result.token && Array.isArray(result.choices)) {
+    const options = result.choices.map((choice) => ({
+      label: choice?.label?.slice(0, 100) || `Treffer ${choice.index + 1}`,
+      description: choice?.description?.slice(0, 100) || undefined,
+      value: choice.index?.toString?.() ?? String(choice?.index ?? 0),
+    }));
+
+    if (options.length === 0) {
+      return interaction.editReply({
+        embeds: [
+          buildActionEmbed({
+            title: "Konnte keine Auswahl bauen",
+            emoji: "🚫",
+            description: "Bitte versuch es nochmal.",
+          }),
+        ],
+      });
+    }
+
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`pick:${result.token}:${interaction.user?.id ?? ""}`)
+      .setPlaceholder("Suchergebnis auswählen")
+      .addOptions(options);
+
+    const message = await interaction.editReply({
+      embeds: [
+        buildActionEmbed({
+          title: "Mehrere Treffer gefunden",
+          emoji: "🔍",
+          description: "Bitte wähle das passende Ergebnis aus der Liste aus.",
+        }),
+      ],
+      components: [new ActionRowBuilder().addComponents(select)],
+    });
+
+    rememberStatusMessage(interaction.guildId, message, interaction.client);
+    return message;
+  }
+
   const label = result.display || `**${result.title || "Unbekannt"}**`;
 
   await deleteLastStatusMessage(interaction.client, interaction.guildId);
@@ -496,10 +535,70 @@ async function handleButton(interaction, ctx, musicService) {
   return replyEphemeral(interaction, "Unbekannte Aktion.");
 }
 
+async function handleSearchSelect(interaction, ctx, musicService) {
+  const [prefix, token, allowedUser] = (interaction.customId || "").split(":");
+  if (prefix !== "pick") return;
+
+  if (allowedUser && allowedUser !== interaction.user?.id) {
+    return replyEphemeral(interaction, "Nur der Nutzer, der gesucht hat, darf auswählen.");
+  }
+
+  const rawValue = interaction.values?.[0];
+  const choiceIndex = Number(rawValue);
+
+  if (Number.isNaN(choiceIndex)) {
+    return replyEphemeral(interaction, "Ungültige Auswahl.");
+  }
+
+  log("info", "[Select] search choice", { ...ctx, choiceIndex });
+
+  const res = await musicService.completeSearchSelection({
+    guildId: interaction.guildId,
+    token,
+    choiceIndex,
+  });
+
+  if (!res.ok) {
+    return replyEphemeral(interaction, "Auswahl nicht mehr gültig. Bitte erneut suchen.");
+  }
+
+  const message = await interaction.update({
+    embeds: res.queued
+      ? [buildQueuedEmbed(res.display, res.queuePosition)]
+      : [
+          buildActionEmbed({
+            title: "Spiele jetzt",
+            emoji: "▶️",
+            description: res.display || "Track wird abgespielt.",
+          }),
+        ],
+    components: [],
+  });
+
+  if (res.queued) {
+    rememberStatusMessage(interaction.guildId, message, interaction.client);
+    return message;
+  }
+
+  return interaction.deleteReply().catch(() => {});
+}
+
 export function setupInteractionHandler(client, musicService) {
   cachedMusicService = musicService;
 
-  const required = ["ensureReady", "join", "play", "skip", "leave", "pause", "resume", "stop", "getQueueSnapshot", "getNowPlaying"];
+  const required = [
+    "ensureReady",
+    "join",
+    "play",
+    "skip",
+    "leave",
+    "pause",
+    "resume",
+    "stop",
+    "getQueueSnapshot",
+    "getNowPlaying",
+    "completeSearchSelection",
+  ];
   const missing = required.filter((m) => typeof musicService?.[m] !== "function");
   if (missing.length > 0) {
     throw new Error(`Music service missing methods: ${missing.join(", ")}`);
@@ -507,10 +606,12 @@ export function setupInteractionHandler(client, musicService) {
 
   // Zentraler Handler für Slash-Commands und Buttons (Playback-Steuerung).
   client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
+    if (!interaction.isChatInputCommand() && !interaction.isButton() && !interaction.isStringSelectMenu()) return;
 
     const ctx = {
-      cmd: interaction.isChatInputCommand() ? interaction.commandName : interaction.customId,
+      cmd: interaction.isChatInputCommand()
+        ? interaction.commandName
+        : interaction.customId || (interaction.isStringSelectMenu() ? "select" : "unknown"),
       guild: interaction.guildId,
       user: interaction.user?.id,
     };
@@ -536,6 +637,10 @@ export function setupInteractionHandler(client, musicService) {
 
       if (interaction.isButton()) {
         return handleButton(interaction, ctx, musicService);
+      }
+
+      if (interaction.isStringSelectMenu()) {
+        return handleSearchSelect(interaction, ctx, musicService);
       }
 
       return replyEphemeral(interaction, "Unbekannter Command.");

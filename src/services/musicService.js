@@ -16,6 +16,7 @@ import { log, errToObj } from "../utils/logger.js";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import { CONTROL_ACTIONS } from "../app/constants.js";
 import { buildNowPlayingEmbed } from "../app/embeds.js";
+import { randomUUID } from "crypto";
 
 // Zustand je Guild in Maps halten, damit der Service instanzlos genutzt werden kann.
 // guildId -> {
@@ -27,6 +28,7 @@ import { buildNowPlayingEmbed } from "../app/embeds.js";
 const queues = new Map();
 const nowPlaying = new Map(); // guildId -> { label: string, artworkUrl?: string }
 const idleTimers = new Map(); // guildId -> Timeout
+const pendingSelections = new Map(); // token -> { guildId, channelId, shardId, deaf, textChannelId, suggestions }
 
 function buildFailure(reason, err, extra = {}) {
   return { ok: false, reason, error: errToObj(err), ...extra };
@@ -143,6 +145,11 @@ function describeTrack(info) {
   if (duration) parts.push(`(${duration})`);
 
   return parts.join(" — ");
+}
+
+function truncate(text, max = 100) {
+  if (!text || typeof text !== "string") return text;
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 function findArtwork(info) {
@@ -327,6 +334,57 @@ function wirePlayerQueue(shoukaku, client, player, guildId) {
   player.on?.("exception", onEndLike);
 }
 
+function looksLikeUrl(input) {
+  try {
+    const url = new URL(input);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isSearchLoadType(loadType) {
+  const normalized = String(loadType || "").toLowerCase();
+  return normalized === "search_result" || normalized === "search";
+}
+
+async function enqueueAndMaybePlay({
+  guildId,
+  track,
+  textChannelId,
+  shoukaku,
+  client,
+  query,
+}) {
+  const q = getQueue(guildId);
+  if (textChannelId) q.announceChannelId = textChannelId;
+
+  const busy = nowPlaying.has(guildId) || q.items.length > 0;
+  q.items.push(track);
+
+  const display = describeTrack(track.info);
+  const title = track.info?.title || "Unbekannt";
+
+  if (busy) {
+    return {
+      ok: true,
+      queued: true,
+      title,
+      display,
+      info: track.info,
+      queuePosition: q.items.length,
+    };
+  }
+
+  try {
+    await playNext(shoukaku, client, guildId);
+    return { ok: true, queued: false, title, display, info: track.info };
+  } catch (e) {
+    log("error", "[Music] Failed to start playback", { guildId, query, err: errToObj(e) });
+    return buildFailure("PLAY_FAILED", e, { query });
+  }
+}
+
 export function createMusicService(shoukaku, client) {
   // Der Music-Service kapselt die Shoukaku-Interaktionen und stellt
   // eine minimalistische API für die Slash-Commands bereit.
@@ -384,36 +442,94 @@ export function createMusicService(shoukaku, client) {
           filteredPremium: resolution?.filteredPremium,
         };
 
+      const isSearchResult = isSearchLoadType(resolution?.loadType);
+      const allowSelection =
+        isSearchResult &&
+        tracks.length > 1 &&
+        !looksLikeUrl(query) &&
+        typeof randomUUID === "function";
+
+      if (allowSelection) {
+        const suggestions = tracks
+          .slice(0, 5)
+          .map((track) => {
+            const encoded = extractEncoded(track);
+            const info = extractInfo(track);
+            if (!encoded) return null;
+            return { encoded, info };
+          })
+          .filter(Boolean);
+
+        if (suggestions.length > 1) {
+          const token = randomUUID();
+          pendingSelections.set(token, {
+            guildId,
+            channelId,
+            shardId,
+            deaf,
+            textChannelId,
+            suggestions,
+          });
+
+          return {
+            ok: true,
+            needsSelection: true,
+            token,
+            choices: suggestions.map((s, idx) => ({
+              index: idx,
+              label: truncate(s.info?.title || s.info?.identifier || `Treffer ${idx + 1}`),
+              description: truncate(describeTrack(s.info)),
+            })),
+          };
+        }
+      }
+
       const track = tracks[0];
       const encoded = extractEncoded(track);
       const info = extractInfo(track);
-      const display = describeTrack(info);
       if (!encoded) return { ok: false, reason: "NO_ENCODED", info };
 
-      const q = getQueue(guildId);
-      if (textChannelId) q.announceChannelId = textChannelId;
+      return enqueueAndMaybePlay({
+        guildId,
+        track: { encoded, info },
+        textChannelId,
+        shoukaku,
+        client,
+        query,
+      });
+    },
 
-      const busy = nowPlaying.has(guildId) || q.items.length > 0;
-      q.items.push({ encoded, info });
+    async completeSearchSelection({ guildId, token, choiceIndex }) {
+      const pending = pendingSelections.get(token);
+      if (!pending) return { ok: false, reason: "SELECTION_EXPIRED" };
+      pendingSelections.delete(token);
 
-      if (busy) {
-        return {
-          ok: true,
-          queued: true,
-          title: info?.title || "Unbekannt",
-          display,
-          info,
-          queuePosition: q.items.length,
-        };
+      if (pending.guildId !== guildId) {
+        return { ok: false, reason: "WRONG_GUILD" };
       }
 
-      try {
-        await playNext(shoukaku, client, guildId);
-        return { ok: true, queued: false, title: info?.title || "Unbekannt", display, info };
-      } catch (e) {
-        log("error", "[Music] Failed to start playback", { guildId, query, err: errToObj(e) });
-        return buildFailure("PLAY_FAILED", e, { query });
+      const selected = pending.suggestions?.[choiceIndex];
+      if (!selected?.encoded) {
+        return { ok: false, reason: "INVALID_SELECTION" };
       }
+
+      const joinResult = await this.join({
+        guildId,
+        channelId: pending.channelId,
+        shardId: pending.shardId,
+        deaf: pending.deaf,
+      });
+
+      if (!joinResult.ok) return joinResult;
+
+      return enqueueAndMaybePlay({
+        guildId,
+        track: selected,
+        textChannelId: pending.textChannelId,
+        shoukaku,
+        client,
+        query: "search-selection",
+      });
     },
 
     /** Springt zum nächsten Track (falls vorhanden) und stoppt den aktuellen. */

@@ -4,6 +4,30 @@
 
 const OEMBED_ENDPOINT = "https://open.spotify.com/oembed?url=";
 
+// Best effort Cleanup für die Suche, damit YouTube die richtigen Uploads findet.
+function cleanupTrackTitle(title) {
+  if (!title) return title;
+
+  // Entferne übliche Suffixe wie "- Remastered 2011" oder "(Single Version)"
+  const withoutRemaster = title
+    .replace(/\s*-\s*remaster(ed)?\s*\d{0,4}\s*$/i, "")
+    .replace(/\s*-\s*single version\s*$/i, "")
+    .replace(/\s*\(.*?version.*?\)\s*$/i, "")
+    .replace(/\s*\(.*?remaster.*?\)\s*$/i, "")
+    .trim();
+
+  return withoutRemaster || title.trim();
+}
+
+function splitArtists(artist) {
+  if (!artist) return [];
+
+  return artist
+    .split(/,|&| feat\.? | featuring | mit /i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 export function isSpotifyUrl(input) {
   if (!input || typeof input !== "string") return false;
 
@@ -52,21 +76,32 @@ export async function buildSpotifyFallbackSearch(url) {
     const res = await fetch(`${OEMBED_ENDPOINT}${encodeURIComponent(url)}`);
     if (res.ok) {
       const data = await res.json();
-      const title = data?.title?.trim();
-      const artist = data?.author_name?.trim();
+      const title = cleanupTrackTitle(data?.title?.trim());
+      const primaryArtist = splitArtists(data?.author_name?.trim())?.[0];
 
-      if (title || artist) {
+      if (title || primaryArtist) {
         const uniqueParts = Array.from(
           new Set([
             title && `"${title}"`,
-            artist && `"${artist}"`,
+            primaryArtist && `"${primaryArtist}"`,
           ].filter(Boolean)),
         );
 
-        // Quotes sorgen dafür, dass der Songtitel/Artist genau gematcht werden
-        // und nicht mit ähnlich benannten Uploads verwechselt werden.
-        const query = `${uniqueParts.join(" ")} official audio`.trim();
-        if (query) return `ytsearch:${query}`;
+        // Quotes sorgen dafür, dass Songtitel/Artists genau gematcht werden und
+        // nicht mit ähnlich benannten Uploads verwechselt werden.
+        const baseQuery = uniqueParts.join(" ").trim();
+        if (baseQuery) {
+          // Zwei Varianten probieren: offizielle Audio-Uploads oder Lyrics,
+          // damit auch Nicht-Topic-Uploads gefunden werden.
+          const queryVariants = [
+            `${baseQuery} official audio`.trim(),
+            `${baseQuery} lyrics`.trim(),
+          ].filter(Boolean);
+
+          if (queryVariants.length > 0) {
+            return `ytsearch:${queryVariants.join(" | ")}`;
+          }
+        }
       }
     }
   } catch {
