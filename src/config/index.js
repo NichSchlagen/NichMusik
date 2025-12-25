@@ -36,3 +36,5 @@ export const EPHEMERAL = 64;
 export const AUTO_LEAVE_MS = Number(env("AUTO_LEAVE_MS", 120000));
 export const HEALTH_PORT = Number(env("HEALTH_PORT", 0));
 export const PLAYLIST_MAX_TRACKS = Number(env("PLAYLIST_MAX_TRACKS", 200));
+export const AUTO_DJ = env("AUTO_DJ", "false").toLowerCase() === "true";
+export const AUTO_DJ_MAX_TRACKS = Number(env("AUTO_DJ_MAX_TRACKS", 5));

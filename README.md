@@ -30,6 +30,8 @@ Der Bot liest seine Einstellungen über Umgebungsvariablen (siehe `src/config/in
 | `AUTO_LEAVE_MS` | Zeit bis zum automatischen Verlassen bei Inaktivität (ms) | `120000` |
 | `HEALTH_PORT` | Optionaler Port für den Health-Endpoint | `0` (deaktiviert) |
 | `PLAYLIST_MAX_TRACKS` | Max. Anzahl Tracks pro Playlist | `200` |
+| `AUTO_DJ` | Aktiviert Auto-DJ, wenn Queue leer ist | `false` |
+| `AUTO_DJ_MAX_TRACKS` | Anzahl Tracks, die Auto-DJ nachlädt | `5` |
 
 ### Beispiel-`.env`
 ```env
@@ -43,6 +45,8 @@ LAVALINK_SECURE=false
 LOG_LEVEL=info
 HEALTH_PORT=3001
 PLAYLIST_MAX_TRACKS=200
+AUTO_DJ=true
+AUTO_DJ_MAX_TRACKS=5
 ```
 
 ## Lokales Setup

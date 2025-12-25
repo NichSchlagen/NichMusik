@@ -12,12 +12,12 @@ import {
   stopPlayer,
   setPaused,
 } from "../infra/lavalink/compat.js";
-import { AUTO_LEAVE_MS, PLAYLIST_MAX_TRACKS } from "../config/index.js";
+import { AUTO_LEAVE_MS, PLAYLIST_MAX_TRACKS, AUTO_DJ, AUTO_DJ_MAX_TRACKS } from "../config/index.js";
 import { resolveMusicQuery, resolvePlaylistQuery } from "../sources/resolver.js";
 import { log, errToObj } from "../utils/logger.js";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import { CONTROL_ACTIONS } from "../app/constants.js";
-import { buildNowPlayingEmbed } from "../app/embeds.js";
+import { buildActionEmbed, buildNowPlayingEmbed } from "../app/embeds.js";
 import { randomUUID } from "crypto";
 
 // Zustand je Guild in Maps halten, damit der Service instanzlos genutzt werden kann.
@@ -35,6 +35,9 @@ const pendingSelectionTimers = new Map(); // token -> Timeout
 const SELECTION_TTL_MS = 60_000;
 const botVoiceChannels = new Map(); // guildId -> channelId
 const statusMessages = new Map(); // guildId -> Set<"channelId:messageId">
+const lastPlayedInfo = new Map(); // guildId -> track info
+const autoDjState = new Map(); // guildId -> { lastAttemptAt: number, lastSeed: string }
+const autoDjDisabled = new Set(); // guildId
 
 function buildFailure(reason, err, extra = {}) {
   return { ok: false, reason, error: errToObj(err), ...extra };
@@ -199,6 +202,41 @@ async function resolveVoiceChannel(client, channelId) {
     return await client.channels.fetch(channelId);
   } catch {
     return null;
+  }
+}
+
+async function announceAutoDj(client, guildId, queue, seed, count) {
+  if (!client || !guildId || !queue?.announceChannelId) return;
+
+  const title = seed?.title || "Auto-DJ";
+  const author = seed?.author ? ` — ${seed.author}` : "";
+  const description = [
+    `Auto-DJ ist aktiv und hat **${count}** Tracks hinzugefügt.`,
+    `Seed: **${title}**${author}`,
+  ].join("\n");
+
+  try {
+    const channel =
+      client.channels?.cache?.get(queue.announceChannelId) ||
+      (await client.channels?.fetch?.(queue.announceChannelId));
+    if (!channel?.send) return;
+
+    const message = await channel.send({
+      embeds: [
+        buildActionEmbed({
+          title: "Auto-DJ",
+          emoji: "🤖",
+          description,
+        }),
+      ],
+    });
+
+    trackStatusMessageInternal(guildId, message);
+  } catch (e) {
+    log("warn", "[Music] Failed to announce auto-dj", {
+      channelId: queue?.announceChannelId,
+      err: errToObj(e),
+    });
   }
 }
 
@@ -385,10 +423,15 @@ async function handleQueueFinished(shoukaku, client, guildId) {
   nowPlaying.delete(guildId);
 
   const q = getQueue(guildId);
-  q.announceChannelId = null;
   await deleteLastAnnouncement(client, q);
   await clearStatusMessagesInternal(client, guildId);
 
+  if (AUTO_DJ && !autoDjDisabled.has(guildId)) {
+    const started = await maybeStartAutoDj(shoukaku, client, guildId);
+    if (started) return;
+  }
+
+  q.announceChannelId = null;
   log("info", "[Music] Queue finished", { guildId });
   scheduleAutoLeave(shoukaku, client, guildId);
 }
@@ -429,6 +472,7 @@ async function playNext(shoukaku, client, guildId) {
       const artworkUrl = findArtwork(next.info);
       const trackMeta = { label: description, artworkUrl };
 
+      lastPlayedInfo.set(guildId, next.info);
       nowPlaying.set(guildId, trackMeta);
       log("info", "[Music] Now playing", { guildId, track: description });
       if (q.announceChannelId) {
@@ -452,6 +496,11 @@ async function playNext(shoukaku, client, guildId) {
     }
   } finally {
     q.playing = false;
+    if (q.items.length > 0 && !nowPlaying.has(guildId)) {
+      setTimeout(() => {
+        playNext(shoukaku, client, guildId).catch(() => {});
+      }, 0);
+    }
   }
 }
 
@@ -489,6 +538,88 @@ function isSearchLoadType(loadType) {
 function isPlaylistLoadType(loadType) {
   const normalized = String(loadType || "").toLowerCase();
   return normalized.includes("playlist");
+}
+
+function normalizeAutoDjLimit() {
+  if (!Number.isFinite(AUTO_DJ_MAX_TRACKS)) return 5;
+  return Math.max(1, Math.min(20, AUTO_DJ_MAX_TRACKS));
+}
+
+function getAutoDjSeed(info) {
+  const title = info?.title?.trim();
+  const author = info?.author?.trim();
+  const identifier = info?.identifier || info?.uri || info?.url || "";
+  const key = [title, author, identifier].filter(Boolean).join("|");
+  return { title, author, identifier, key };
+}
+
+function isSameTrack(a, b) {
+  if (!a || !b) return false;
+  const aId = a?.identifier || a?.uri || a?.url;
+  const bId = b?.identifier || b?.uri || b?.url;
+  return Boolean(aId && bId && aId === bId);
+}
+
+async function maybeStartAutoDj(shoukaku, client, guildId) {
+  const seedInfo = lastPlayedInfo.get(guildId);
+  if (!seedInfo) return false;
+
+  const { title, author, identifier, key } = getAutoDjSeed(seedInfo);
+  if (!title) return false;
+
+  const state = autoDjState.get(guildId) || { lastAttemptAt: 0, lastSeed: "" };
+  const now = Date.now();
+  if (state.lastSeed === key && now - state.lastAttemptAt < 15_000) {
+    return false;
+  }
+
+  autoDjState.set(guildId, { lastAttemptAt: now, lastSeed: key });
+
+  const queryBase = [title, author].filter(Boolean).join(" ").trim();
+  if (!queryBase) return false;
+
+  try {
+    const node = pickNode(shoukaku);
+    if (!node) return false;
+
+    const query = `${queryBase} mix`;
+    const resolution = await resolveMusicQuery(node, query);
+    const tracks = (resolution?.tracks || []).map((t) => ({
+      encoded: extractEncoded(t),
+      info: extractInfo(t),
+    }));
+
+    const limit = normalizeAutoDjLimit();
+    const candidates = tracks.filter((t) => t.encoded);
+    let chosen = candidates.filter((t) => !isSameTrack(t.info, seedInfo)).slice(0, limit);
+    if (chosen.length === 0) chosen = candidates.slice(0, limit);
+
+    if (chosen.length === 0) return false;
+
+    const result = await enqueuePlaylistAndMaybePlay({
+      guildId,
+      tracks: chosen,
+      textChannelId: getQueue(guildId).announceChannelId,
+      shoukaku,
+      client,
+      query: "auto-dj",
+    });
+
+    if (result.ok) {
+      log("info", "[Music] Auto-DJ queued", {
+        guildId,
+        seed: { title, author, identifier },
+        count: chosen.length,
+      });
+      const q = getQueue(guildId);
+      await announceAutoDj(client, guildId, q, { title, author }, chosen.length);
+      return true;
+    }
+  } catch (e) {
+    log("warn", "[Music] Auto-DJ failed", { guildId, err: errToObj(e) });
+  }
+
+  return false;
 }
 
 async function handlePlaylistResolution({
@@ -671,6 +802,7 @@ export function createMusicService(shoukaku, client) {
     async play({ guildId, channelId, shardId, query, deaf = true, textChannelId = null }) {
       mustGetNode(shoukaku);
       clearIdleTimer(guildId);
+      autoDjDisabled.delete(guildId);
 
       const joinResult = await this.join({ guildId, channelId, shardId, deaf });
       if (!joinResult.ok) return joinResult;
@@ -871,6 +1003,7 @@ export function createMusicService(shoukaku, client) {
       const player = getExistingPlayer(shoukaku, guildId);
       if (!player) return { ok: false, reason: "NO_PLAYER" };
 
+      autoDjDisabled.add(guildId);
       await deleteLastAnnouncement(client, getQueue(guildId));
       await clearStatusMessagesInternal(client, guildId);
       resetQueueState(guildId);
@@ -913,6 +1046,7 @@ export function createMusicService(shoukaku, client) {
     async playPlaylist({ guildId, channelId, shardId, query, deaf = true, textChannelId = null }) {
       mustGetNode(shoukaku);
       clearIdleTimer(guildId);
+      autoDjDisabled.delete(guildId);
 
       const joinResult = await this.join({ guildId, channelId, shardId, deaf });
       if (!joinResult.ok) return joinResult;
