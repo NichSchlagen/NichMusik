@@ -65,4 +65,22 @@ export const slashCommands = [
   new SlashCommandBuilder()
     .setName("nowplaying")
     .setDescription("Zeigt den aktuell laufenden Track"),
+
+  new SlashCommandBuilder()
+    .setName("autodj")
+    .setDescription("Schaltet Auto-DJ an oder aus")
+    .addStringOption((o) =>
+      o
+        .setName("mode")
+        .setDescription("on/off")
+        .setRequired(true)
+        .addChoices(
+          { name: "on", value: "on" },
+          { name: "off", value: "off" }
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("stats")
+    .setDescription("Zeigt Bot-Statistiken"),
 ].map((c) => c.toJSON());

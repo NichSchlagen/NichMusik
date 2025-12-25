@@ -9,6 +9,7 @@ import {
   buildQueuedEmbed,
   buildNowPlayingEmbed,
   buildQueueEmbed,
+  buildStatsEmbed,
 } from "./embeds.js";
 
 function isVoiceJoinTimeout(e) {
@@ -65,6 +66,9 @@ function canJoinVoice(interaction, vc) {
   if (!me) return { ok: true };
 
   const perms = vc.permissionsFor(me);
+  if (!perms?.has(PermissionsBitField.Flags.ViewChannel)) {
+    return { ok: false, message: "ÐYs® Ich darf den Voice-Channel nicht sehen (VIEW_CHANNEL fehlt)." };
+  }
   if (!perms?.has(PermissionsBitField.Flags.Connect)) {
     return { ok: false, message: "🚫 Ich darf dem Voice-Channel nicht beitreten (CONNECT fehlt)." };
   }
@@ -146,6 +150,17 @@ function getBotVoiceChannelId(interaction) {
   return interaction.guild?.members?.me?.voice?.channelId || null;
 }
 
+function buildOtherVoiceMessage(interaction, botChannelId) {
+  const channel = interaction.guild?.channels?.cache?.get(botChannelId);
+  if (!channel) return "Der Bot ist bereits in einem anderen Voice-Channel. Nutze **/leave** oder komm dazu.";
+
+  const canView = channel.permissionsFor?.(interaction.member)?.has?.(
+    PermissionsBitField.Flags.ViewChannel
+  );
+  const suffix = canView && channel.name ? ` Der Bot ist in **${channel.name}**.` : "";
+  return `Der Bot ist bereits in einem anderen Voice-Channel.${suffix} Nutze **/leave** oder komm dazu.`;
+}
+
 function ensureSameVoiceChannel(interaction) {
   const botChannelId = getBotVoiceChannelId(interaction);
   if (!botChannelId) return true;
@@ -153,7 +168,12 @@ function ensureSameVoiceChannel(interaction) {
   const userChannelId = interaction.member?.voice?.channelId || null;
   if (userChannelId && userChannelId === botChannelId) return true;
 
-  replyEphemeral(interaction, "Du musst im selben Voice-Channel sein wie der Bot.");
+  if (userChannelId) {
+    replyEphemeral(interaction, buildOtherVoiceMessage(interaction, botChannelId));
+    return false;
+  }
+
+  replyEphemeral(interaction, "Der Bot ist bereits in einem Voice-Channel. Tritt ihm bei oder nutze **/leave**.");
   return false;
 }
 
@@ -213,6 +233,18 @@ function getNowPlayingSafe(musicService, guildId) {
     log("error", "[Slash] nowplaying failed", { guildId, err: errToObj(e) });
     return { ok: false, track: null, reason: "NOW_PLAYING_ERROR" };
   }
+}
+
+function formatUptime(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = Math.floor(total % 60);
+  const parts = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0 || hours > 0) parts.push(`${minutes}m`);
+  parts.push(`${secs}s`);
+  return parts.join(" ");
 }
 
 async function handleJoin(interaction, ctx, musicService) {
@@ -465,6 +497,94 @@ function handleQueue(interaction, _ctx, musicService) {
     });
 }
 
+async function handleAutoDj(interaction, ctx, musicService) {
+  log("info", "[Slash] autodj", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
+
+  const mode = interaction.options.getString("mode", true);
+  const enabled = mode === "on";
+
+  const res = musicService.setAutoDj({ guildId: interaction.guildId, enabled });
+  if (!res.ok && res.reason === "AUTO_DJ_DISABLED") {
+    return replyEphemeral(
+      interaction,
+      "Auto-DJ ist global deaktiviert. Setze `AUTO_DJ=true` in der .env."
+    );
+  }
+
+  const stateLabel = res.enabled ? "aktiv" : "deaktiviert";
+  const prefLabel = res.preference ? "on" : "off";
+  const globalLabel = res.globallyEnabled ? "on" : "off";
+
+  return interaction.reply({
+    embeds: [
+      buildActionEmbed({
+        title: "Auto-DJ",
+        description: `Auto-DJ ist jetzt **${stateLabel}**.\nGlobal: **${globalLabel}** | Preference: **${prefLabel}**`,
+      }),
+    ],
+    flags: EPHEMERAL,
+  });
+}
+
+function handleStats(interaction, ctx, musicService) {
+  log("info", "[Slash] stats", ctx);
+
+  const snapshot = musicService.getHealthSnapshot();
+  const autoDj = musicService.getAutoDjStatus({ guildId: interaction.guildId });
+  const mem = process.memoryUsage();
+  const toMb = (n) => (n / 1024 / 1024).toFixed(1);
+  const uptime = formatUptime(process.uptime());
+
+  const autoPrefLabel =
+    autoDj.preference === null ? "default" : autoDj.preference ? "on" : "off";
+  const autoGlobalLabel = autoDj.globallyEnabled ? "on" : "off";
+  const autoEffectiveLabel = autoDj.enabled ? "on" : "off";
+
+  const descriptionLines = [
+    `Uptime: **${uptime}**`,
+    `Memory: **${toMb(mem.rss)} MB** RSS | Heap **${toMb(mem.heapUsed)}/${toMb(mem.heapTotal)} MB**`,
+    `Node.js: **${process.version}**`,
+  ];
+
+  const nodeName = snapshot.node?.name || "n/a";
+  const nodeStatus = snapshot.node?.connected ? "online" : "offline";
+  const nodeState = snapshot.node?.state ? ` (${snapshot.node.state})` : "";
+
+  return interaction.reply({
+    embeds: [
+      buildStatsEmbed({
+        title: "Bot Stats",
+        descriptionLines,
+        fields: [
+          {
+            name: "Lavalink",
+            value: `${nodeName} | ${nodeStatus}${nodeState}`,
+            inline: true,
+          },
+          {
+            name: "Queues",
+            value: `Guilds: **${snapshot.queues.guilds}**\nItems: **${snapshot.queues.totalItems}**\nNow Playing: **${snapshot.queues.nowPlaying}**`,
+            inline: true,
+          },
+          {
+            name: "Sessions",
+            value: `Voice: **${snapshot.voiceSessions}**\nSelections: **${snapshot.pendingSelections}**`,
+            inline: true,
+          },
+          {
+            name: "Auto-DJ",
+            value: `Global: **${autoGlobalLabel}**\nPref: **${autoPrefLabel}**\nEffective: **${autoEffectiveLabel}**`,
+            inline: true,
+          },
+        ],
+        footer: "NichMusik",
+      }),
+    ],
+    flags: EPHEMERAL,
+  });
+}
+
 async function replyWithPlaylist(interaction, result, musicService) {
   const title = result.playlistName || "Playlist";
   const lines = [
@@ -621,6 +741,8 @@ const slashHandlers = {
   stop: handleStop,
   volume: handleVolume,
   nowplaying: handleNowPlaying,
+  autodj: handleAutoDj,
+  stats: handleStats,
 };
 
 async function handleButton(interaction, ctx, musicService) {
@@ -788,6 +910,9 @@ export function setupInteractionHandler(client, musicService) {
     "completeSearchSelection",
     "clearSessionMessages",
     "untrackStatusMessage",
+    "getHealthSnapshot",
+    "setAutoDj",
+    "getAutoDjStatus",
   ];
   const missing = required.filter((m) => typeof musicService?.[m] !== "function");
   if (missing.length > 0) {

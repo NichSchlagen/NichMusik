@@ -21,6 +21,21 @@ export function buildActionEmbed({ title, description, emoji, footer }) {
   return embed;
 }
 
+export function buildStatsEmbed({ title, descriptionLines, fields, footer }) {
+  const embed = baseEmbed().setTitle(title || "Stats");
+
+  if (Array.isArray(descriptionLines) && descriptionLines.length > 0) {
+    embed.setDescription(descriptionLines.join("\n"));
+  }
+
+  if (Array.isArray(fields) && fields.length > 0) {
+    embed.addFields(fields);
+  }
+
+  if (footer) embed.setFooter({ text: footer });
+  return embed;
+}
+
 export function buildQueuedEmbed(trackLabel, queuePosition) {
   const description = ["✅ Zur Queue hinzugefügt:", `> ${trackLabel}`];
 

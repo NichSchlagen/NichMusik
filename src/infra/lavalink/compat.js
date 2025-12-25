@@ -5,7 +5,10 @@
 // ---- Node / Player Helpers (versions-safe) ----
 /** Liefert true, wenn der Node laut State als connected gilt. */
 export function isNodeConnected(node) {
-  return !!node && (node.state === 2 || node.state === "CONNECTED");
+  return (
+    !!node &&
+    (node.state === 1 || node.state === 2 || node.state === "CONNECTED")
+  );
 }
 
 export function pickNode(shoukaku) {

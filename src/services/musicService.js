@@ -38,7 +38,8 @@ const botVoiceChannels = new Map(); // guildId -> channelId
 const statusMessages = new Map(); // guildId -> Set<"channelId:messageId">
 const lastPlayedInfo = new Map(); // guildId -> track info
 const autoDjState = new Map(); // guildId -> { lastAttemptAt: number, lastSeed: string }
-const autoDjDisabled = new Set(); // guildId
+const autoDjPreference = new Map(); // guildId -> boolean (true=on, false=off), undefined=use global
+const autoDjSessionDisabled = new Set(); // guildId (disabled via /stop)
 
 function buildFailure(reason, err, extra = {}) {
   return { ok: false, reason, error: errToObj(err), ...extra };
@@ -427,7 +428,7 @@ async function handleQueueFinished(shoukaku, client, guildId) {
   await deleteLastAnnouncement(client, q);
   await clearStatusMessagesInternal(client, guildId);
 
-  if (AUTO_DJ && !autoDjDisabled.has(guildId)) {
+  if (isAutoDjEnabled(guildId)) {
     const started = await maybeStartAutoDj(shoukaku, client, guildId);
     if (started) return;
   }
@@ -559,6 +560,14 @@ function isSameTrack(a, b) {
   const aId = a?.identifier || a?.uri || a?.url;
   const bId = b?.identifier || b?.uri || b?.url;
   return Boolean(aId && bId && aId === bId);
+}
+
+function isAutoDjEnabled(guildId) {
+  if (!AUTO_DJ) return false;
+  const pref = autoDjPreference.get(guildId);
+  if (pref === false) return false;
+  if (autoDjSessionDisabled.has(guildId)) return false;
+  return true;
 }
 
 async function maybeStartAutoDj(shoukaku, client, guildId) {
@@ -803,7 +812,9 @@ export function createMusicService(shoukaku, client) {
     async play({ guildId, channelId, shardId, query, deaf = true, textChannelId = null }) {
       mustGetNode(shoukaku);
       clearIdleTimer(guildId);
-      autoDjDisabled.delete(guildId);
+      if (autoDjPreference.get(guildId) !== false) {
+        autoDjSessionDisabled.delete(guildId);
+      }
 
       const joinResult = await this.join({ guildId, channelId, shardId, deaf });
       if (!joinResult.ok) return joinResult;
@@ -1017,7 +1028,7 @@ export function createMusicService(shoukaku, client) {
       const player = getExistingPlayer(shoukaku, guildId);
       if (!player) return { ok: false, reason: "NO_PLAYER" };
 
-      autoDjDisabled.add(guildId);
+      autoDjSessionDisabled.add(guildId);
       await deleteLastAnnouncement(client, getQueue(guildId));
       await clearStatusMessagesInternal(client, guildId);
       resetQueueState(guildId);
@@ -1060,7 +1071,9 @@ export function createMusicService(shoukaku, client) {
     async playPlaylist({ guildId, channelId, shardId, query, deaf = true, textChannelId = null }) {
       mustGetNode(shoukaku);
       clearIdleTimer(guildId);
-      autoDjDisabled.delete(guildId);
+      if (autoDjPreference.get(guildId) !== false) {
+        autoDjSessionDisabled.delete(guildId);
+      }
 
       const joinResult = await this.join({ guildId, channelId, shardId, deaf });
       if (!joinResult.ok) return joinResult;
@@ -1136,6 +1149,41 @@ export function createMusicService(shoukaku, client) {
         },
         pendingSelections: pendingSelections.size,
         voiceSessions: botVoiceChannels.size,
+        autoDj: {
+          globallyEnabled: AUTO_DJ,
+          preferenceGuilds: autoDjPreference.size,
+          sessionDisabledGuilds: autoDjSessionDisabled.size,
+        },
+      };
+    },
+
+    setAutoDj({ guildId, enabled }) {
+      if (enabled && !AUTO_DJ) {
+        return { ok: false, reason: "AUTO_DJ_DISABLED" };
+      }
+
+      if (enabled) {
+        autoDjPreference.set(guildId, true);
+        autoDjSessionDisabled.delete(guildId);
+      } else {
+        autoDjPreference.set(guildId, false);
+        autoDjSessionDisabled.add(guildId);
+      }
+
+      return {
+        ok: true,
+        enabled: isAutoDjEnabled(guildId),
+        preference: enabled,
+        globallyEnabled: AUTO_DJ,
+      };
+    },
+
+    getAutoDjStatus({ guildId }) {
+      return {
+        enabled: isAutoDjEnabled(guildId),
+        globallyEnabled: AUTO_DJ,
+        preference: autoDjPreference.get(guildId) ?? null,
+        sessionDisabled: autoDjSessionDisabled.has(guildId),
       };
     },
   };
