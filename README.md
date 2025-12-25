@@ -8,7 +8,9 @@ NichMusik ist ein schlanker Discord-Music-Bot auf Basis von [discord.js](https:/
 - Auto-Leave bei Inaktivität (konfigurierbar)
 - YouTube-Suche plus Spotify-Fallback (Spotify-Links werden in YouTube-Suche übersetzt)
 - SoundCloud-Support inkl. Playlists
-- Auto-DJ optional: füllt die Queue mit ähnlichen Tracks, wenn sie leer ist
+- Auto-DJ optional: fuellt die Queue mit aehnlichen Tracks, wenn sie leer ist
+- Auto-DJ Toggle pro Guild: `/autodj on|off`
+- `/stats` zeigt Bot- und Lavalink-Status
 - Health-Endpoint für einfache Deploy-Checks
 
 ## Voraussetzungen
@@ -85,7 +87,9 @@ HEALTH_PORT=3001
 - `/resume` – Weiter
 - `/stop` – Stoppt die Wiedergabe, leert die Queue
 - `/volume <0-100>` – Setzt die Lautstärke
-- `/nowplaying` – Zeigt den aktuellen Track
+- `/nowplaying` - Zeigt den aktuellen Track
+- `/autodj <on|off>` - Schaltet Auto-DJ pro Guild an/aus (globales `AUTO_DJ` muss aktiv sein)
+- `/stats` - Zeigt Bot-Statistiken, Lavalink-Status, Queues und Sessions
 
 ## Now-Playing & Buttons
 Bei `/play` sendet der Bot im Text-Channel eine Now-Playing-Nachricht mit Buttons:
@@ -107,7 +111,8 @@ Wenn `AUTO_DJ=true`, füllt der Bot die Queue nach, sobald sie leer ist:
 - Seed ist der zuletzt gespielte Track
 - Es wird eine YouTube-Suche mit `"<title> <author> mix"` durchgeführt
 - Es werden bis zu `AUTO_DJ_MAX_TRACKS` Tracks eingereiht
-- `/stop` deaktiviert Auto-DJ für diese Session; beim nächsten `/play` wird es wieder aktiviert
+- `/stop` deaktiviert Auto-DJ fuer diese Session; beim naechsten `/play` wird es wieder aktiviert (sofern `/autodj off` nicht gesetzt ist)
+- `/autodj off` deaktiviert Auto-DJ dauerhaft fuer die Guild, `/autodj on` aktiviert es wieder
 
 ## Health-Endpoint
 Setze `HEALTH_PORT`, um `http://localhost:<port>/health` zu aktivieren.  
@@ -143,3 +148,5 @@ npm run smoke
 
 ## Lizenz
 MIT License. Siehe `LICENSE`.
+
+
