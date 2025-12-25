@@ -34,3 +34,5 @@ export const EPHEMERAL = 64;
 
 // --- Bot ---
 export const AUTO_LEAVE_MS = Number(env("AUTO_LEAVE_MS", 120000));
+export const HEALTH_PORT = Number(env("HEALTH_PORT", 0));
+export const PLAYLIST_MAX_TRACKS = Number(env("PLAYLIST_MAX_TRACKS", 200));

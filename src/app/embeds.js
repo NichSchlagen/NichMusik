@@ -75,7 +75,21 @@ export function buildQueueEmbed(snapshot) {
     lines.push(`… und **${snapshot.items.length - 10}** weitere`);
   }
 
-  embed.addFields({ name: "Als Nächstes", value: lines.join("\n") });
+  const MAX_FIELD_VALUE = 1024;
+  const clipped = [];
+  let used = 0;
+  for (const line of lines) {
+    const nextLen = line.length + (clipped.length ? 1 : 0);
+    if (used + nextLen > MAX_FIELD_VALUE) break;
+    clipped.push(line);
+    used += nextLen;
+  }
+
+  if (clipped.length === 0) {
+    clipped.push("Queue zu lang für Anzeige. Verwende **/nowplaying**.");
+  }
+
+  embed.addFields({ name: "Als Nächstes", value: clipped.join("\n") });
   embed.setFooter({ text: "Tipp: /nowplaying zeigt den aktuellen Track." });
 
   return embed;

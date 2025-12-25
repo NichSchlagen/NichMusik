@@ -2,6 +2,8 @@
 // Enthält die Kernlogik für Queueing, Playback und Voice-Management rund um Lavalink.
 import {
   mustGetNode,
+  pickNode,
+  isNodeConnected,
   getExistingPlayer,
   joinOrGetPlayer,
   extractEncoded,
@@ -10,8 +12,8 @@ import {
   stopPlayer,
   setPaused,
 } from "../infra/lavalink/compat.js";
-import { AUTO_LEAVE_MS } from "../config/index.js";
-import { resolveMusicQuery } from "../sources/resolver.js";
+import { AUTO_LEAVE_MS, PLAYLIST_MAX_TRACKS } from "../config/index.js";
+import { resolveMusicQuery, resolvePlaylistQuery } from "../sources/resolver.js";
 import { log, errToObj } from "../utils/logger.js";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import { CONTROL_ACTIONS } from "../app/constants.js";
@@ -31,6 +33,8 @@ const idleTimers = new Map(); // guildId -> Timeout
 const pendingSelections = new Map(); // token -> { guildId, channelId, shardId, deaf, textChannelId, suggestions }
 const pendingSelectionTimers = new Map(); // token -> Timeout
 const SELECTION_TTL_MS = 60_000;
+const botVoiceChannels = new Map(); // guildId -> channelId
+const statusMessages = new Map(); // guildId -> Set<"channelId:messageId">
 
 function buildFailure(reason, err, extra = {}) {
   return { ok: false, reason, error: errToObj(err), ...extra };
@@ -112,6 +116,7 @@ async function announceNowPlaying(client, queue, nowPlayingInfo, guildId) {
     });
 
     queue.lastAnnounceMessage = { channelId: channel.id, messageId: message.id };
+    trackStatusMessageInternal(guildId, message);
   } catch (e) {
     log("warn", "[Music] Failed to announce now playing", {
       channelId: queue?.announceChannelId,
@@ -171,6 +176,108 @@ function scheduleSelectionExpiry(token) {
   );
 }
 
+function setBotVoiceChannelId(guildId, channelId) {
+  if (!guildId) return;
+  if (channelId) botVoiceChannels.set(guildId, channelId);
+  else botVoiceChannels.delete(guildId);
+}
+
+function getBotVoiceChannelId(client, guildId) {
+  return (
+    botVoiceChannels.get(guildId) ||
+    client?.guilds?.cache?.get(guildId)?.members?.me?.voice?.channelId ||
+    null
+  );
+}
+
+async function resolveVoiceChannel(client, channelId) {
+  if (!client || !channelId) return null;
+  const cached = client.channels?.cache?.get?.(channelId);
+  if (cached) return cached;
+  if (!client.channels?.fetch) return null;
+  try {
+    return await client.channels.fetch(channelId);
+  } catch {
+    return null;
+  }
+}
+
+async function deleteMessageById(client, channelId, messageId) {
+  if (!client || !channelId || !messageId) return;
+
+  try {
+    const channel = client.channels?.cache?.get(channelId) || (await client.channels?.fetch?.(channelId));
+    if (!channel?.messages?.fetch) return;
+
+    const message = await channel.messages.fetch(messageId).catch(() => null);
+    if (!message) return;
+
+    if (message.deletable) await message.delete().catch(() => {});
+  } catch (e) {
+    log("warn", "[Music] Failed to delete status message", { err: errToObj(e), channelId, messageId });
+  }
+}
+
+function trackStatusMessageInternal(guildId, message) {
+  if (!guildId || !message?.id || !message?.channelId) return;
+
+  const key = `${message.channelId}:${message.id}`;
+  let set = statusMessages.get(guildId);
+  if (!set) {
+    set = new Set();
+    statusMessages.set(guildId, set);
+  }
+  set.add(key);
+}
+
+function untrackStatusMessageInternal(guildId, channelId, messageId) {
+  if (!guildId || !channelId || !messageId) return;
+  const set = statusMessages.get(guildId);
+  if (!set) return;
+
+  set.delete(`${channelId}:${messageId}`);
+  if (set.size === 0) statusMessages.delete(guildId);
+}
+
+async function clearStatusMessagesInternal(client, guildId) {
+  const set = statusMessages.get(guildId);
+  if (!set || set.size === 0) return;
+
+  statusMessages.delete(guildId);
+
+  const byChannel = new Map();
+  for (const key of set) {
+    const parts = key.split(":");
+    if (parts.length !== 2) continue;
+    const [channelId, messageId] = parts;
+    if (!byChannel.has(channelId)) byChannel.set(channelId, []);
+    byChannel.get(channelId).push(messageId);
+  }
+
+  for (const [channelId, messageIds] of byChannel) {
+    for (const messageId of messageIds) {
+      await deleteMessageById(client, channelId, messageId);
+    }
+  }
+}
+
+async function getListenerCount(client, guildId) {
+  const channelId = getBotVoiceChannelId(client, guildId);
+  if (!channelId) return 0;
+
+  const channel = await resolveVoiceChannel(client, channelId);
+  if (!channel?.isVoiceBased?.()) return 0;
+
+  const members = channel.members;
+  if (!members || typeof members.values !== "function") return 0;
+
+  let count = 0;
+  for (const member of members.values()) {
+    if (!member?.user?.bot) count += 1;
+  }
+  return count;
+}
+
 function findArtwork(info) {
   const artwork = info?.artworkUrl || info?.artwork_url || info?.thumbnail;
   if (typeof artwork === "string") return artwork;
@@ -192,7 +299,7 @@ function clearIdleTimer(guildId) {
   idleTimers.delete(guildId);
 }
 
-function scheduleAutoLeave(shoukaku, guildId, ms = AUTO_LEAVE_MS || 120000) {
+function scheduleAutoLeave(shoukaku, client, guildId, ms = AUTO_LEAVE_MS || 120000) {
   clearIdleTimer(guildId);
 
   log("info", "[Music] Auto-leave scheduled", { guildId, afterMs: ms });
@@ -207,11 +314,21 @@ function scheduleAutoLeave(shoukaku, guildId, ms = AUTO_LEAVE_MS || 120000) {
         if (nowPlaying.has(guildId)) return;
         if (q.items.length > 0) return;
 
+        const listenerCount = await getListenerCount(client, guildId);
+        if (listenerCount > 0) {
+          log("info", "[Music] Auto-leave skipped (listeners present)", {
+            guildId,
+            listenerCount,
+          });
+          return;
+        }
+
         const player = getExistingPlayer(shoukaku, guildId);
 
         // Player kann bereits weg sein -> trotzdem Voice verlassen
         if (!player) {
           await shoukaku.leaveVoiceChannel?.(guildId);
+          setBotVoiceChannelId(guildId, null);
           return;
         }
 
@@ -246,6 +363,7 @@ function scheduleAutoLeave(shoukaku, guildId, ms = AUTO_LEAVE_MS || 120000) {
           log("info", "[Music] Leaving idle voice channel", { guildId });
           if (typeof player.disconnect === "function") await player.disconnect();
           else await shoukaku.leaveVoiceChannel?.(guildId);
+          setBotVoiceChannelId(guildId, null);
         }
       } finally {
         idleTimers.delete(guildId);
@@ -269,9 +387,10 @@ async function handleQueueFinished(shoukaku, client, guildId) {
   const q = getQueue(guildId);
   q.announceChannelId = null;
   await deleteLastAnnouncement(client, q);
+  await clearStatusMessagesInternal(client, guildId);
 
   log("info", "[Music] Queue finished", { guildId });
-  scheduleAutoLeave(shoukaku, guildId);
+  scheduleAutoLeave(shoukaku, client, guildId);
 }
 
 async function playNext(shoukaku, client, guildId) {
@@ -326,7 +445,7 @@ async function playNext(shoukaku, client, guildId) {
         // Queue ist damit konsistent, aber der Player steht noch -> erneut versuchen.
         if (q.items.length === 0) {
           q.announceChannelId = null;
-          scheduleAutoLeave(shoukaku, guildId);
+          scheduleAutoLeave(shoukaku, client, guildId);
           return;
         }
       }
@@ -367,6 +486,56 @@ function isSearchLoadType(loadType) {
   return normalized === "search_result" || normalized === "search";
 }
 
+function isPlaylistLoadType(loadType) {
+  const normalized = String(loadType || "").toLowerCase();
+  return normalized.includes("playlist");
+}
+
+async function handlePlaylistResolution({
+  resolution,
+  tracks,
+  guildId,
+  textChannelId,
+  shoukaku,
+  client,
+  query,
+}) {
+  const playlistInfo = resolution?.playlistInfo;
+  const playlistName = playlistInfo?.name || playlistInfo?.title || null;
+
+  const maxTracks = Number.isFinite(PLAYLIST_MAX_TRACKS) ? PLAYLIST_MAX_TRACKS : 200;
+  const limitedTracks = maxTracks > 0 ? tracks.slice(0, maxTracks) : tracks;
+  const playlistTracks = limitedTracks
+    .map((track) => {
+      const encoded = extractEncoded(track);
+      const info = extractInfo(track);
+      if (!encoded) return null;
+      return { encoded, info };
+    })
+    .filter(Boolean);
+
+  if (playlistTracks.length === 0) {
+    return { ok: false, reason: "NO_ENCODED", info: playlistInfo };
+  }
+
+  const playlistResult = await enqueuePlaylistAndMaybePlay({
+    guildId,
+    tracks: playlistTracks,
+    textChannelId,
+    shoukaku,
+    client,
+    query,
+  });
+
+  return {
+    ...playlistResult,
+    playlistName,
+    playlistUrl: playlistInfo?.url || null,
+    playlistTotal: tracks.length,
+    playlistLimit: maxTracks,
+  };
+}
+
 async function enqueueAndMaybePlay({
   guildId,
   track,
@@ -404,6 +573,50 @@ async function enqueueAndMaybePlay({
   }
 }
 
+async function enqueuePlaylistAndMaybePlay({
+  guildId,
+  tracks,
+  textChannelId,
+  shoukaku,
+  client,
+  query,
+}) {
+  const q = getQueue(guildId);
+  if (textChannelId) q.announceChannelId = textChannelId;
+
+  const wasBusy = nowPlaying.has(guildId) || q.items.length > 0;
+  q.items.push(...tracks);
+
+  const first = tracks[0];
+  const firstLabel = first ? describeTrack(first.info) : null;
+
+  if (wasBusy) {
+    return {
+      ok: true,
+      queued: true,
+      playlist: true,
+      firstTrackLabel: firstLabel,
+      trackCount: tracks.length,
+      queuedCount: tracks.length,
+    };
+  }
+
+  try {
+    await playNext(shoukaku, client, guildId);
+    return {
+      ok: true,
+      queued: false,
+      playlist: true,
+      firstTrackLabel: firstLabel,
+      trackCount: tracks.length,
+      queuedCount: Math.max(0, tracks.length - 1),
+    };
+  } catch (e) {
+    log("error", "[Music] Failed to start playlist playback", { guildId, query, err: errToObj(e) });
+    return buildFailure("PLAYLIST_PLAY_FAILED", e, { query });
+  }
+}
+
 export function createMusicService(shoukaku, client) {
   // Der Music-Service kapselt die Shoukaku-Interaktionen und stellt
   // eine minimalistische API für die Slash-Commands bereit.
@@ -414,6 +627,26 @@ export function createMusicService(shoukaku, client) {
       return true;
     },
 
+    /** Trackt Voice-State-Änderungen des Bots. */
+    handleBotVoiceStateUpdate({ guildId, channelId }) {
+      setBotVoiceChannelId(guildId, channelId);
+
+      if (!channelId) {
+        clearIdleTimer(guildId);
+        deleteLastAnnouncement(client, getQueue(guildId)).catch(() => {});
+        clearStatusMessagesInternal(client, guildId).catch(() => {});
+        resetQueueState(guildId);
+      }
+    },
+
+    /** Startet Auto-Leave, wenn gerade wirklich nichts los ist. */
+    maybeScheduleAutoLeave({ guildId }) {
+      if (nowPlaying.has(guildId)) return;
+      const q = getQueue(guildId);
+      if (q.items.length > 0) return;
+      scheduleAutoLeave(shoukaku, client, guildId);
+    },
+
     /** Join- oder bestehender Player, inkl. Stoppen des Auto-Leaves. */
     async join({ guildId, channelId, shardId, deaf = true }) {
       try {
@@ -422,6 +655,7 @@ export function createMusicService(shoukaku, client) {
 
         const player = await joinOrGetPlayer(shoukaku, { guildId, channelId, shardId, deaf });
         wirePlayerQueue(shoukaku, client, player, guildId);
+        setBotVoiceChannelId(guildId, channelId);
 
         return { ok: true, player };
       } catch (e) {
@@ -460,6 +694,19 @@ export function createMusicService(shoukaku, client) {
           source: resolution?.source,
           filteredPremium: resolution?.filteredPremium,
         };
+
+      const isPlaylistResult = isPlaylistLoadType(resolution?.loadType);
+      if (isPlaylistResult) {
+        return handlePlaylistResolution({
+          resolution,
+          tracks,
+          guildId,
+          textChannelId,
+          shoukaku,
+          client,
+          query,
+        });
+      }
 
       const isSearchResult = isSearchLoadType(resolution?.loadType);
       const allowSelection =
@@ -579,15 +826,18 @@ export function createMusicService(shoukaku, client) {
       clearIdleTimer(guildId);
 
       await deleteLastAnnouncement(client, getQueue(guildId));
+      await clearStatusMessagesInternal(client, guildId);
       resetQueueState(guildId);
 
       if (typeof player.disconnect === "function") {
         await player.disconnect();
+        setBotVoiceChannelId(guildId, null);
         return { ok: true };
       }
 
       if (typeof shoukaku.leaveVoiceChannel === "function") {
         await shoukaku.leaveVoiceChannel(guildId);
+        setBotVoiceChannelId(guildId, null);
         return { ok: true };
       }
 
@@ -622,10 +872,11 @@ export function createMusicService(shoukaku, client) {
       if (!player) return { ok: false, reason: "NO_PLAYER" };
 
       await deleteLastAnnouncement(client, getQueue(guildId));
+      await clearStatusMessagesInternal(client, guildId);
       resetQueueState(guildId);
 
       await stopPlayer(player);
-      scheduleAutoLeave(shoukaku, guildId);
+      scheduleAutoLeave(shoukaku, client, guildId);
       return { ok: true };
     },
 
@@ -655,6 +906,88 @@ export function createMusicService(shoukaku, client) {
       return {
         nowPlaying: nowPlaying.get(guildId)?.label || null,
         items: q.items.map((x) => describeTrack(x.info)),
+      };
+    },
+
+    /** Spielt nur Playlists; normale Queries werden abgelehnt. */
+    async playPlaylist({ guildId, channelId, shardId, query, deaf = true, textChannelId = null }) {
+      mustGetNode(shoukaku);
+      clearIdleTimer(guildId);
+
+      const joinResult = await this.join({ guildId, channelId, shardId, deaf });
+      if (!joinResult.ok) return joinResult;
+
+      const node = mustGetNode(shoukaku);
+
+      let resolution;
+      try {
+        resolution = await resolvePlaylistQuery(node, query);
+      } catch (e) {
+        log("error", "[Music] Playlist resolution failed", { guildId, query, err: errToObj(e) });
+        return buildFailure("RESOLVE_FAILED", e, { query });
+      }
+
+      const tracks = resolution?.tracks || [];
+      if (!tracks.length)
+        return {
+          ok: false,
+          reason: "NO_TRACKS",
+          loadType: resolution?.loadType,
+          source: resolution?.source,
+          filteredPremium: resolution?.filteredPremium,
+        };
+
+      const isPlaylistResult = isPlaylistLoadType(resolution?.loadType);
+      if (!isPlaylistResult) {
+        return { ok: false, reason: "NOT_PLAYLIST", loadType: resolution?.loadType };
+      }
+
+      return handlePlaylistResolution({
+        resolution,
+        tracks,
+        guildId,
+        textChannelId,
+        shoukaku,
+        client,
+        query,
+      });
+    },
+    trackStatusMessage({ guildId, message }) {
+      trackStatusMessageInternal(guildId, message);
+    },
+
+    untrackStatusMessage({ guildId, channelId, messageId }) {
+      untrackStatusMessageInternal(guildId, channelId, messageId);
+    },
+
+    async clearSessionMessages({ guildId }) {
+      await deleteLastAnnouncement(client, getQueue(guildId));
+      await clearStatusMessagesInternal(client, guildId);
+    },
+
+    /** Health Snapshot für Monitoring. */
+    getHealthSnapshot() {
+      let totalItems = 0;
+      for (const q of queues.values()) totalItems += q.items.length;
+
+      const node = pickNode(shoukaku);
+      const nodeStatus = node
+        ? {
+            name: node.name || "unknown",
+            connected: isNodeConnected(node),
+            state: node.state ?? null,
+          }
+        : { name: null, connected: false, state: null };
+
+      return {
+        node: nodeStatus,
+        queues: {
+          guilds: queues.size,
+          totalItems,
+          nowPlaying: nowPlaying.size,
+        },
+        pendingSelections: pendingSelections.size,
+        voiceSessions: botVoiceChannels.size,
       };
     },
   };

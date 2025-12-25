@@ -28,6 +28,8 @@ Der Bot liest seine Einstellungen über Umgebungsvariablen (siehe `src/config/in
 | `LAVALINK_SECURE` | `true` wenn TLS genutzt werden soll | `false` |
 | `LOG_LEVEL` | `debug`, `info`, `warn` oder `error` | `info` |
 | `AUTO_LEAVE_MS` | Zeit bis zum automatischen Verlassen bei Inaktivität (ms) | `120000` |
+| `HEALTH_PORT` | Optionaler Port für den Health-Endpoint | `0` (deaktiviert) |
+| `PLAYLIST_MAX_TRACKS` | Max. Anzahl Tracks pro Playlist | `200` |
 
 ### Beispiel-`.env`
 ```env
@@ -39,6 +41,8 @@ LAVALINK_HOST=lavalink
 LAVALINK_PORT=2333
 LAVALINK_SECURE=false
 LOG_LEVEL=info
+HEALTH_PORT=3001
+PLAYLIST_MAX_TRACKS=200
 ```
 
 ## Lokales Setup
@@ -67,10 +71,12 @@ Beim ersten Start registriert der Bot die Slash-Commands automatisch. Mit gesetz
 - **YouTube**: URLs werden normalisiert, reine Suchbegriffe automatisch zu einer YouTube-Suche umgewandelt.
 - **Spotify**: Links werden geparst und in eine YouTube-Suche übersetzt, damit Lavalink immer etwas Abspielbares bekommt.
 - **SoundCloud**: Wird direkt an Lavalink durchgereicht (inkl. Playlists), ohne Premium-Einschränkungen zu filtern.
+- **Playlists**: YouTube- und SoundCloud-Playlists werden als Queue geladen.
 
 ## Slash-Commands
 - `/join` – Bot joint deinen aktuellen Voice-Channel.
 - `/play <query|url>` – Spielt einen Song/URL ab oder stellt ihn in die Queue; der Text-Channel wird für "Now Playing"-Updates gemerkt.
+- `/playlist <url>` – Spielt eine Playlist-URL ab (YouTube/SoundCloud) und lädt mehrere Tracks in die Queue.
 - `/skip` – Überspringt den aktuellen Track und springt zum nächsten Queue-Eintrag.
 - `/leave` – Bot verlässt den Voice-Channel und leert die Queue.
 - `/queue` – Zeigt aktuell spielenden Titel und die nächsten Einträge (max. 10).
@@ -111,6 +117,9 @@ Lavalink wird als interner Service gestartet; der Bot wartet, bis der Healthchec
 - Log-Level über `LOG_LEVEL` konfigurierbar.
 - Unhandled rejections/exceptions werden auf Prozess-Ebene geloggt.
 - Der Bot versucht, hilfreiche Fehlermeldungen für Voice-Join-Probleme zurückzugeben.
+
+## Health-Endpoint
+Wenn `HEALTH_PORT` gesetzt ist, startet der Bot einen JSON-Healthcheck unter `http://localhost:<port>/health`.
 
 ## Lizenz
 

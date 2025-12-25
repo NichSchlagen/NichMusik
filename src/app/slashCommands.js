@@ -17,6 +17,16 @@ export const slashCommands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("playlist")
+    .setDescription("Spielt eine Playlist-URL ab")
+    .addStringOption((o) =>
+      o
+        .setName("query")
+        .setDescription("Playlist-URL")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName("skip")
     .setDescription("Skippt den aktuellen Track"),
 

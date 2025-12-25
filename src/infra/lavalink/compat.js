@@ -93,6 +93,7 @@ export function extractInfo(track) {
 // Lavalink v4 safe: resolve result
 export function extractTracksFromResolve(res) {
   // v4: { loadType, data: Track | Track[] }
+  if (Array.isArray(res?.data?.tracks)) return res.data.tracks;
   if (Array.isArray(res?.data)) return res.data;
   if (res?.data) return [res.data];
 

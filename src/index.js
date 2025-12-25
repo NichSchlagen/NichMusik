@@ -3,11 +3,12 @@
 // verdrahtet Event-Handler und stößt die Registrierung der Slash-Commands an.
 import { Events } from "discord.js";
 
-import { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, LAVALINK, LOG_LEVEL } from "./config/index.js";
+import { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, LAVALINK, LOG_LEVEL, HEALTH_PORT } from "./config/index.js";
 import { log, errToObj } from "./utils/logger.js";
 
 import { createDiscordClient } from "./infra/discord/client.js";
 import { createShoukaku } from "./infra/lavalink/shoukaku.js";
+import { startHealthServer } from "./infra/health/server.js";
 
 import { createMusicService } from "./services/musicService.js";
 import { registerSlashCommands } from "./app/registerCommands.js";
@@ -24,7 +25,7 @@ process.on("uncaughtException", (e) => {
 
 // --- Startup logs ---
 // Frühzeitige Info über Runtime-Parameter, damit Diagnosen im Betrieb einfacher sind.
-log("info", "Starting NichMuski…", {
+log("info", "Starting NichMusik…", {
   logLevel: LOG_LEVEL,
   lavalink: { host: LAVALINK.host, port: LAVALINK.port, secure: LAVALINK.secure },
   hasToken: Boolean(DISCORD_TOKEN),
@@ -47,10 +48,34 @@ if (!CLIENT_ID) {
 const client = createDiscordClient();
 const shoukaku = createShoukaku(client);
 const musicService = createMusicService(shoukaku, client);
+startHealthServer({ port: HEALTH_PORT, getSnapshot: () => musicService.getHealthSnapshot() });
 
 // --- Wire handlers ---
 // Slash-Command-Handler mit Discord-Client und Music-Service verbinden.
 setupInteractionHandler(client, musicService);
+
+// --- Voice state handling ---
+// Hält den internen Zustand stabil, wenn der Bot verschoben oder getrennt wird.
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+  const guildId = newState.guild?.id || oldState.guild?.id;
+  if (!guildId) return;
+
+  if (newState.member?.id === client.user?.id) {
+    musicService.handleBotVoiceStateUpdate({ guildId, channelId: newState.channelId });
+    return;
+  }
+
+  const botChannelId = client.guilds?.cache?.get(guildId)?.members?.me?.voice?.channelId || null;
+  const touchedChannelId = newState.channelId || oldState.channelId;
+  if (!botChannelId || touchedChannelId !== botChannelId) return;
+
+  const channel = newState.channel || oldState.channel;
+  if (!channel?.members) return;
+  const listenerCount = [...channel.members.values()].filter((m) => !m.user?.bot).length;
+  if (listenerCount === 0) {
+    musicService.maybeScheduleAutoLeave({ guildId });
+  }
+});
 
 // --- Ready hook ---
 // Sobald Discord ready meldet, Commands registrieren und ein paar Kennzahlen loggen.

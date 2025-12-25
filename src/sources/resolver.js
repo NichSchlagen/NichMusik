@@ -12,6 +12,15 @@ import {
   normalizeSpotifyUrl,
 } from "./spotify.js";
 
+function looksLikeUrl(input) {
+  try {
+    const url = new URL(input);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 async function resolveWithContext(node, query, source) {
   try {
     return await node.rest.resolve(query);
@@ -53,6 +62,7 @@ export async function resolveMusicQuery(node, rawQuery) {
       loadType: res?.loadType,
       tracks,
       source: "soundcloud",
+      playlistInfo: res?.playlistInfo || res?.data?.info || null,
     };
   }
 
@@ -61,5 +71,45 @@ export async function resolveMusicQuery(node, rawQuery) {
   const res = await resolveWithContext(node, ytQuery, "youtube");
   const tracks = extractTracksFromResolve(res);
 
-  return { loadType: res?.loadType, tracks, source: "youtube", usedQuery: ytQuery };
+  return {
+    loadType: res?.loadType,
+    tracks,
+    source: "youtube",
+    usedQuery: ytQuery,
+    playlistInfo: res?.playlistInfo || res?.data?.info || null,
+  };
+}
+
+export async function resolvePlaylistQuery(node, rawQuery) {
+  const query = rawQuery?.trim();
+  if (!query) return { loadType: "NO_QUERY", tracks: [], source: "unknown" };
+
+  // Playlist-Command erwartet eine URL
+  if (!looksLikeUrl(query)) {
+    return { loadType: "NO_QUERY", tracks: [], source: "unknown" };
+  }
+
+  if (isSpotifyUrl(query)) {
+    return { loadType: "NO_PLAYLIST", tracks: [], source: "spotify" };
+  }
+
+  if (isSoundCloudQuery(query)) {
+    const res = await resolveWithContext(node, query, "soundcloud");
+    const tracks = extractTracksFromResolve(res);
+    return {
+      loadType: res?.loadType,
+      tracks,
+      source: "soundcloud",
+      playlistInfo: res?.playlistInfo || res?.data?.info || null,
+    };
+  }
+
+  const res = await resolveWithContext(node, query, "playlist-url");
+  const tracks = extractTracksFromResolve(res);
+  return {
+    loadType: res?.loadType,
+    tracks,
+    source: "playlist-url",
+    playlistInfo: res?.playlistInfo || res?.data?.info || null,
+  };
 }

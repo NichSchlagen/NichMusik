@@ -35,6 +35,7 @@ function describeUserFacingFailure(res, kind = "generic") {
 
   if (res.reason === "NO_TRACKS") return "Nichts gefunden. 😵‍💫";
   if (res.reason === "NO_ENCODED") return "Track geladen, aber Encoding fehlt (API mismatch).";
+  if (res.reason === "NOT_PLAYLIST") return "Das ist keine Playlist. Bitte eine Playlist-URL verwenden.";
 
   if (kind === "join") {
     return `🚫 Konnte dem Voice-Channel nicht beitreten${detail ? ` (${detail})` : "."}`;
@@ -84,7 +85,7 @@ function clearStatusTimer(guildId) {
   lastStatusTimers.delete(guildId);
 }
 
-async function deleteLastStatusMessage(client, guildId) {
+async function deleteLastStatusMessage(client, guildId, musicService) {
   const last = lastStatusMessages.get(guildId);
   clearStatusTimer(guildId);
   if (!client || !last?.channelId || !last?.messageId) return;
@@ -102,16 +103,22 @@ async function deleteLastStatusMessage(client, guildId) {
     log("warn", "[Slash] Failed to delete last status message", { guildId, err: errToObj(e) });
   } finally {
     lastStatusMessages.delete(guildId);
+    musicService?.untrackStatusMessage?.({
+      guildId,
+      channelId: last?.channelId,
+      messageId: last?.messageId,
+    });
   }
 }
 
-function rememberStatusMessage(guildId, message, client, ttlMs) {
+function rememberStatusMessage(guildId, message, client, ttlMs, musicService) {
   if (!guildId || !message?.id || !message?.channelId) return;
   clearStatusTimer(guildId);
   lastStatusMessages.set(guildId, { channelId: message.channelId, messageId: message.id });
+  musicService?.trackStatusMessage?.({ guildId, message });
 
   if (ttlMs && client) {
-    const timer = setTimeout(() => deleteLastStatusMessage(client, guildId), ttlMs);
+    const timer = setTimeout(() => deleteLastStatusMessage(client, guildId, musicService), ttlMs);
     lastStatusTimers.set(guildId, timer);
   }
 }
@@ -223,7 +230,7 @@ async function handleJoin(interaction, ctx, musicService) {
     return replyEphemeral(interaction, describeUserFacingFailure(joinResult, "join"));
   }
 
-  await deleteLastStatusMessage(interaction.client, interaction.guildId);
+  await deleteLastStatusMessage(interaction.client, interaction.guildId, musicService);
 
   await interaction.reply({
     embeds: [
@@ -236,7 +243,7 @@ async function handleJoin(interaction, ctx, musicService) {
   });
 
   const message = await interaction.fetchReply().catch(() => null);
-  rememberStatusMessage(interaction.guildId, message, interaction.client);
+  rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
 
   return message;
 }
@@ -317,21 +324,70 @@ async function handlePlay(interaction, ctx, musicService) {
       message?.edit?.({ components: [disabledRow] }).catch(() => {});
     }, ttlMs);
 
-    rememberStatusMessage(interaction.guildId, message, interaction.client);
+    rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
     return message;
   }
 
+  if (result.playlist) return replyWithPlaylist(interaction, result, musicService);
+
   const label = result.display || `**${result.title || "Unbekannt"}**`;
 
-  await deleteLastStatusMessage(interaction.client, interaction.guildId);
+  await deleteLastStatusMessage(interaction.client, interaction.guildId, musicService);
 
   if (!result.queued) {
     return interaction.deleteReply().catch(() => {});
   }
 
   const message = await interaction.editReply({ embeds: [buildQueuedEmbed(label, result.queuePosition)] });
-  rememberStatusMessage(interaction.guildId, message, interaction.client);
+  rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
   return message;
+}
+
+async function handlePlaylist(interaction, ctx, musicService) {
+  const query = interaction.options.getString("query", true);
+  const vc = ensureVoiceChannel(interaction);
+  if (!vc) return;
+  if (!ensureSameVoiceChannel(interaction)) return;
+
+  const check = canJoinVoice(interaction, vc);
+  if (!check.ok) return replyEphemeral(interaction, check.message);
+
+  log("info", "[Slash] playlist", { ...ctx, channel: vc.id, query });
+  await interaction.deferReply();
+
+  const result = await musicService.playPlaylist({
+    guildId: interaction.guildId,
+    channelId: vc.id,
+    shardId: interaction.guild?.shardId ?? 0,
+    query,
+    deaf: true,
+    textChannelId: interaction.channelId,
+  });
+
+  if (!result.ok) {
+    const friendly = describeUserFacingFailure(result, "play");
+    return interaction.editReply({
+      embeds: [
+        buildActionEmbed({
+          title: "Konnte Playlist nicht laden",
+          emoji: "🚫",
+          description: friendly,
+        }),
+      ],
+    });
+  }
+
+  if (result.playlist) return replyWithPlaylist(interaction, result, musicService);
+
+  return interaction.editReply({
+    embeds: [
+      buildActionEmbed({
+        title: "Konnte Playlist nicht laden",
+        emoji: "🚫",
+        description: "Das ist keine Playlist oder konnte nicht erkannt werden.",
+      }),
+    ],
+  });
 }
 
 async function handleSkip(interaction, ctx, musicService) {
@@ -352,9 +408,9 @@ async function handleSkip(interaction, ctx, musicService) {
 
 async function handleLeave(interaction, ctx, musicService) {
   log("info", "[Slash] leave", ctx);
-  if (!ensureSameVoiceChannel(interaction)) return;
 
-  await deleteLastStatusMessage(interaction.client, interaction.guildId);
+  await deleteLastStatusMessage(interaction.client, interaction.guildId, musicService);
+  await musicService.clearSessionMessages({ guildId: interaction.guildId });
 
   const res = await musicService.leave({ guildId: interaction.guildId });
   if (!res.ok && res.reason === "NO_PLAYER") {
@@ -376,7 +432,7 @@ async function handleLeave(interaction, ctx, musicService) {
     })
     .then(() => interaction.fetchReply().catch(() => null));
 
-  rememberStatusMessage(interaction.guildId, message, interaction.client, LEAVE_STATUS_TTL_MS);
+  rememberStatusMessage(interaction.guildId, message, interaction.client, LEAVE_STATUS_TTL_MS, musicService);
   return message;
 }
 
@@ -391,7 +447,53 @@ function handleQueue(interaction, _ctx, musicService) {
     });
   }
 
-  return interaction.reply({ embeds: [buildQueueEmbed(snap)] });
+  return interaction
+    .reply({ embeds: [buildQueueEmbed(snap)] })
+    .then(() => interaction.fetchReply().catch(() => null))
+    .then((message) => {
+      rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
+      return message;
+    });
+}
+
+async function replyWithPlaylist(interaction, result, musicService) {
+  const title = result.playlistName || "Playlist";
+  const lines = [
+    `**${title}**`,
+    `Tracks: **${result.trackCount}**`,
+  ];
+  if (
+    Number.isFinite(result.playlistTotal) &&
+    Number.isFinite(result.playlistLimit) &&
+    result.playlistTotal > result.playlistLimit
+  ) {
+    lines.push(`Limit: **${result.playlistLimit}** (von ${result.playlistTotal})`);
+  }
+
+  if (result.firstTrackLabel) {
+    lines.push(
+      result.queued
+        ? `Als nächstes: ${result.firstTrackLabel}`
+        : `Spiele jetzt: ${result.firstTrackLabel}`
+    );
+  }
+
+  if (result.queued && Number.isFinite(result.queuedCount)) {
+    lines.push(`In Queue: **${result.queuedCount}**`);
+  }
+
+  const message = await interaction.editReply({
+    embeds: [
+      buildActionEmbed({
+        title: "Playlist hinzugefügt",
+        emoji: "📚",
+        description: lines.join("\n"),
+      }),
+    ],
+  });
+
+  rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
+  return message;
 }
 
 async function handlePause(interaction, ctx, musicService) {
@@ -437,15 +539,20 @@ async function handleStop(interaction, ctx, musicService) {
     return replyEphemeral(interaction, "Kein Player aktiv.");
   }
 
-  return interaction.reply({
-    embeds: [
-      buildActionEmbed({
-        title: "Gestoppt",
-        emoji: "⏹️",
-        description: "Wiedergabe gestoppt und Queue geleert.",
-      }),
-    ],
-  });
+  const message = await interaction
+    .reply({
+      embeds: [
+        buildActionEmbed({
+          title: "Gestoppt",
+          emoji: "⏹️",
+          description: "Wiedergabe gestoppt und Queue geleert.",
+        }),
+      ],
+    })
+    .then(() => interaction.fetchReply().catch(() => null));
+
+  rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
+  return message;
 }
 
 function handleNowPlaying(interaction, _ctx, musicService) {
@@ -455,12 +562,19 @@ function handleNowPlaying(interaction, _ctx, musicService) {
     return replyEphemeral(interaction, "Gerade läuft nichts.");
   }
 
-  return interaction.reply({ embeds: [buildNowPlayingEmbed(res.track)] });
+  return interaction
+    .reply({ embeds: [buildNowPlayingEmbed(res.track)] })
+    .then(() => interaction.fetchReply().catch(() => null))
+    .then((message) => {
+      rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
+      return message;
+    });
 }
 
 const slashHandlers = {
   join: handleJoin,
   play: handlePlay,
+  playlist: handlePlaylist,
   skip: handleSkip,
   leave: handleLeave,
   queue: handleQueue,
@@ -609,7 +723,7 @@ async function handleSearchSelect(interaction, ctx, musicService) {
   });
 
   if (res.queued) {
-    rememberStatusMessage(interaction.guildId, message, interaction.client);
+    rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
     return message;
   }
 
@@ -623,6 +737,7 @@ export function setupInteractionHandler(client, musicService) {
     "ensureReady",
     "join",
     "play",
+    "playPlaylist",
     "skip",
     "leave",
     "pause",
@@ -631,6 +746,8 @@ export function setupInteractionHandler(client, musicService) {
     "getQueueSnapshot",
     "getNowPlaying",
     "completeSearchSelection",
+    "clearSessionMessages",
+    "untrackStatusMessage",
   ];
   const missing = required.filter((m) => typeof musicService?.[m] !== "function");
   if (missing.length > 0) {
