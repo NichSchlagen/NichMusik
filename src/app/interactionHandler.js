@@ -129,6 +129,21 @@ function ensureVoiceChannel(interaction) {
   return null;
 }
 
+function getBotVoiceChannelId(interaction) {
+  return interaction.guild?.members?.me?.voice?.channelId || null;
+}
+
+function ensureSameVoiceChannel(interaction) {
+  const botChannelId = getBotVoiceChannelId(interaction);
+  if (!botChannelId) return true;
+
+  const userChannelId = interaction.member?.voice?.channelId || null;
+  if (userChannelId && userChannelId === botChannelId) return true;
+
+  replyEphemeral(interaction, "Du musst im selben Voice-Channel sein wie der Bot.");
+  return false;
+}
+
 let cachedMusicService = null;
 
 function getQueueSnapshotSafe(musicService, guildId) {
@@ -190,6 +205,7 @@ function getNowPlayingSafe(musicService, guildId) {
 async function handleJoin(interaction, ctx, musicService) {
   const vc = ensureVoiceChannel(interaction);
   if (!vc) return;
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   const check = canJoinVoice(interaction, vc);
   if (!check.ok) return replyEphemeral(interaction, check.message);
@@ -229,6 +245,7 @@ async function handlePlay(interaction, ctx, musicService) {
   const query = interaction.options.getString("query", true);
   const vc = ensureVoiceChannel(interaction);
   if (!vc) return;
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   const check = canJoinVoice(interaction, vc);
   if (!check.ok) return replyEphemeral(interaction, check.message);
@@ -293,6 +310,13 @@ async function handlePlay(interaction, ctx, musicService) {
       components: [new ActionRowBuilder().addComponents(select)],
     });
 
+    const ttlMs = Number.isFinite(result.ttlMs) ? result.ttlMs : 60_000;
+    const disabledSelect = StringSelectMenuBuilder.from(select).setDisabled(true);
+    const disabledRow = new ActionRowBuilder().addComponents(disabledSelect);
+    setTimeout(() => {
+      message?.edit?.({ components: [disabledRow] }).catch(() => {});
+    }, ttlMs);
+
     rememberStatusMessage(interaction.guildId, message, interaction.client);
     return message;
   }
@@ -312,6 +336,7 @@ async function handlePlay(interaction, ctx, musicService) {
 
 async function handleSkip(interaction, ctx, musicService) {
   log("info", "[Slash] skip", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   const res = await musicService.skip({ guildId: interaction.guildId });
   if (!res.ok) return replyEphemeral(interaction, "Kein Player aktiv.");
@@ -327,6 +352,7 @@ async function handleSkip(interaction, ctx, musicService) {
 
 async function handleLeave(interaction, ctx, musicService) {
   log("info", "[Slash] leave", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   await deleteLastStatusMessage(interaction.client, interaction.guildId);
 
@@ -355,6 +381,7 @@ async function handleLeave(interaction, ctx, musicService) {
 }
 
 function handleQueue(interaction, _ctx, musicService) {
+  if (!ensureSameVoiceChannel(interaction)) return;
   const snap = getQueueSnapshotSafe(musicService, interaction.guildId);
 
   if (!snap.nowPlaying && snap.items.length === 0) {
@@ -369,6 +396,7 @@ function handleQueue(interaction, _ctx, musicService) {
 
 async function handlePause(interaction, ctx, musicService) {
   log("info", "[Slash] pause", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   const res = await musicService.pause({ guildId: interaction.guildId });
   if (!res.ok && res.reason === "NO_PLAYER") {
@@ -385,6 +413,7 @@ async function handlePause(interaction, ctx, musicService) {
 
 async function handleResume(interaction, ctx, musicService) {
   log("info", "[Slash] resume", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   const res = await musicService.resume({ guildId: interaction.guildId });
   if (!res.ok && res.reason === "NO_PLAYER") {
@@ -401,6 +430,7 @@ async function handleResume(interaction, ctx, musicService) {
 
 async function handleStop(interaction, ctx, musicService) {
   log("info", "[Slash] stop", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   const res = await musicService.stop({ guildId: interaction.guildId });
   if (!res.ok && res.reason === "NO_PLAYER") {
@@ -419,6 +449,7 @@ async function handleStop(interaction, ctx, musicService) {
 }
 
 function handleNowPlaying(interaction, _ctx, musicService) {
+  if (!ensureSameVoiceChannel(interaction)) return;
   const res = getNowPlayingSafe(musicService, interaction.guildId);
   if (!res.ok || !res.track) {
     return replyEphemeral(interaction, "Gerade läuft nichts.");
@@ -442,6 +473,7 @@ const slashHandlers = {
 async function handleButton(interaction, ctx, musicService) {
   const [prefix, targetGuildId, action] = (interaction.customId || "").split(":");
   if (prefix !== "np") return;
+  if (!ensureSameVoiceChannel(interaction)) return;
   if (targetGuildId && targetGuildId !== interaction.guildId) {
     return replyEphemeral(interaction, "Dieser Button gehört zu einem anderen Server.");
   }
@@ -538,6 +570,7 @@ async function handleButton(interaction, ctx, musicService) {
 async function handleSearchSelect(interaction, ctx, musicService) {
   const [prefix, token, allowedUser] = (interaction.customId || "").split(":");
   if (prefix !== "pick") return;
+  if (!ensureSameVoiceChannel(interaction)) return;
 
   if (allowedUser && allowedUser !== interaction.user?.id) {
     return replyEphemeral(interaction, "Nur der Nutzer, der gesucht hat, darf auswählen.");

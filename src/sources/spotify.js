@@ -3,6 +3,7 @@
 // keine Spotify-Integration besitzt.
 
 const OEMBED_ENDPOINT = "https://open.spotify.com/oembed?url=";
+const FETCH_TIMEOUT_MS = 4000;
 
 // Best effort Cleanup für die Suche, damit YouTube die richtigen Uploads findet.
 function cleanupTrackTitle(title) {
@@ -72,8 +73,14 @@ export async function buildSpotifyFallbackSearch(url) {
   // für die YouTube-Suche zu erhalten.
   if (typeof fetch !== "function") return `ytsearch:${url}`;
 
+  let timeout = null;
   try {
-    const res = await fetch(`${OEMBED_ENDPOINT}${encodeURIComponent(url)}`);
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    timeout = controller ? setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS) : null;
+    const res = await fetch(
+      `${OEMBED_ENDPOINT}${encodeURIComponent(url)}`,
+      controller ? { signal: controller.signal } : undefined
+    );
     if (res.ok) {
       const data = await res.json();
       const title = cleanupTrackTitle(data?.title?.trim());
@@ -106,6 +113,8 @@ export async function buildSpotifyFallbackSearch(url) {
     }
   } catch {
     // Netzwerkfehler -> Fallback weiter unten benutzen
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 
   // Minimaler Fallback: nutze die URL selbst als Suchbegriff, damit die

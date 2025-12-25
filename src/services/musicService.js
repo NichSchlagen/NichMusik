@@ -29,6 +29,8 @@ const queues = new Map();
 const nowPlaying = new Map(); // guildId -> { label: string, artworkUrl?: string }
 const idleTimers = new Map(); // guildId -> Timeout
 const pendingSelections = new Map(); // token -> { guildId, channelId, shardId, deaf, textChannelId, suggestions }
+const pendingSelectionTimers = new Map(); // token -> Timeout
+const SELECTION_TTL_MS = 60_000;
 
 function buildFailure(reason, err, extra = {}) {
   return { ok: false, reason, error: errToObj(err), ...extra };
@@ -150,6 +152,23 @@ function describeTrack(info) {
 function truncate(text, max = 100) {
   if (!text || typeof text !== "string") return text;
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function clearSelectionTimer(token) {
+  const t = pendingSelectionTimers.get(token);
+  if (t) clearTimeout(t);
+  pendingSelectionTimers.delete(token);
+}
+
+function scheduleSelectionExpiry(token) {
+  clearSelectionTimer(token);
+  pendingSelectionTimers.set(
+    token,
+    setTimeout(() => {
+      pendingSelections.delete(token);
+      pendingSelectionTimers.delete(token);
+    }, SELECTION_TTL_MS)
+  );
 }
 
 function findArtwork(info) {
@@ -470,11 +489,13 @@ export function createMusicService(shoukaku, client) {
             textChannelId,
             suggestions,
           });
+          scheduleSelectionExpiry(token);
 
           return {
             ok: true,
             needsSelection: true,
             token,
+            ttlMs: SELECTION_TTL_MS,
             choices: suggestions.map((s, idx) => ({
               index: idx,
               label: truncate(s.info?.title || s.info?.identifier || `Treffer ${idx + 1}`),
@@ -503,6 +524,7 @@ export function createMusicService(shoukaku, client) {
       const pending = pendingSelections.get(token);
       if (!pending) return { ok: false, reason: "SELECTION_EXPIRED" };
       pendingSelections.delete(token);
+      clearSelectionTimer(token);
 
       if (pending.guildId !== guildId) {
         return { ok: false, reason: "WRONG_GUILD" };
