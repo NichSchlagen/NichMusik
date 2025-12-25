@@ -415,19 +415,22 @@ async function handleSkip(interaction, ctx, musicService) {
 async function handleLeave(interaction, ctx, musicService) {
   log("info", "[Slash] leave", ctx);
 
+  await interaction.deferReply();
+
   await deleteLastStatusMessage(interaction.client, interaction.guildId, musicService);
   await musicService.clearSessionMessages({ guildId: interaction.guildId });
 
   const res = await musicService.leave({ guildId: interaction.guildId });
   if (!res.ok && res.reason === "NO_PLAYER") {
-    return replyEphemeral(interaction, "Ich bin nicht im Voice.");
+    await interaction.editReply("Ich bin nicht im Voice.");
+    return null;
   }
   if (!res.ok && res.reason === "NO_DISCONNECT_METHOD") {
     throw new Error("No disconnect method found (player.disconnect / shoukaku.leaveVoiceChannel).");
   }
 
   const message = await interaction
-    .reply({
+    .editReply({
       embeds: [
         buildActionEmbed({
           title: "Voice verlassen",
