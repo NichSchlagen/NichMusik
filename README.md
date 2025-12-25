@@ -87,6 +87,7 @@ Beim ersten Start registriert der Bot die Slash-Commands automatisch. Mit gesetz
 - `/pause` – Pausiert die Wiedergabe.
 - `/resume` – Setzt die Wiedergabe fort.
 - `/stop` – Stoppt die Wiedergabe, leert die Queue, bleibt aber im Voice.
+- `/volume <0-100>` – Setzt die Lautstärke.
 - `/nowplaying` – Zeigt den aktuell laufenden Track.
 
 ### Now-Playing-Buttons

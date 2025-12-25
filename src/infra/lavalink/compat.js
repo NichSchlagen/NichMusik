@@ -136,3 +136,11 @@ export async function setPaused(player, paused) {
   if (typeof player.update === "function") return await player.update({ paused });
   throw new Error("Player has no pause control.");
 }
+
+// v4-safe volume control
+export async function setVolume(player, volume) {
+  if (typeof player.setVolume === "function") return await player.setVolume(volume);
+  if (typeof player.volume === "function") return await player.volume(volume);
+  if (typeof player.update === "function") return await player.update({ volume });
+  throw new Error("Player has no volume control.");
+}

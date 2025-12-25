@@ -11,6 +11,7 @@ import {
   playEncoded,
   stopPlayer,
   setPaused,
+  setVolume,
 } from "../infra/lavalink/compat.js";
 import { AUTO_LEAVE_MS, PLAYLIST_MAX_TRACKS, AUTO_DJ, AUTO_DJ_MAX_TRACKS } from "../config/index.js";
 import { resolveMusicQuery, resolvePlaylistQuery } from "../sources/resolver.js";
@@ -996,6 +997,19 @@ export function createMusicService(shoukaku, client) {
 
       await setPaused(player, false);
       return { ok: true };
+    },
+
+    /** Setzt die Lautstärke (0-100). */
+    async volume({ guildId, volume }) {
+      const player = getExistingPlayer(shoukaku, guildId);
+      if (!player) return { ok: false, reason: "NO_PLAYER" };
+
+      const vol = Number(volume);
+      if (!Number.isFinite(vol)) return { ok: false, reason: "INVALID_VOLUME" };
+      if (vol < 0 || vol > 100) return { ok: false, reason: "OUT_OF_RANGE" };
+
+      await setVolume(player, Math.round(vol));
+      return { ok: true, volume: Math.round(vol) };
     },
 
     /** Stoppt die Wiedergabe und leert die Queue, bleibt aber im Voice. */

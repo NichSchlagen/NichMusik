@@ -36,6 +36,8 @@ function describeUserFacingFailure(res, kind = "generic") {
   if (res.reason === "NO_TRACKS") return "Nichts gefunden. 😵‍💫";
   if (res.reason === "NO_ENCODED") return "Track geladen, aber Encoding fehlt (API mismatch).";
   if (res.reason === "NOT_PLAYLIST") return "Das ist keine Playlist. Bitte eine Playlist-URL verwenden.";
+  if (res.reason === "INVALID_VOLUME") return "Ungültige Lautstärke.";
+  if (res.reason === "OUT_OF_RANGE") return "Lautstärke muss zwischen 0 und 100 liegen.";
 
   if (kind === "join") {
     return `🚫 Konnte dem Voice-Channel nicht beitreten${detail ? ` (${detail})` : "."}`;
@@ -43,6 +45,10 @@ function describeUserFacingFailure(res, kind = "generic") {
 
   if (kind === "play") {
     return `🚫 Song konnte nicht gestartet werden${detail ? ` (${detail})` : "."}`;
+  }
+
+  if (kind === "volume") {
+    return `🚫 Lautstärke konnte nicht gesetzt werden${detail ? ` (${detail})` : "."}`;
   }
 
   return `💥 Unerwarteter Fehler${detail ? ` (${detail})` : "."}`;
@@ -555,6 +561,35 @@ async function handleStop(interaction, ctx, musicService) {
   return message;
 }
 
+async function handleVolume(interaction, ctx, musicService) {
+  log("info", "[Slash] volume", ctx);
+  if (!ensureSameVoiceChannel(interaction)) return;
+
+  const volume = interaction.options.getInteger("value", true);
+  const res = await musicService.volume({ guildId: interaction.guildId, volume });
+  if (!res.ok && res.reason === "NO_PLAYER") {
+    return replyEphemeral(interaction, "Kein Player aktiv.");
+  }
+  if (!res.ok) {
+    return replyEphemeral(interaction, describeUserFacingFailure(res, "volume"));
+  }
+
+  const message = await interaction
+    .reply({
+      embeds: [
+        buildActionEmbed({
+          title: "Lautstärke gesetzt",
+          emoji: "🔊",
+          description: `Neue Lautstärke: **${res.volume}%**`,
+        }),
+      ],
+    })
+    .then(() => interaction.fetchReply().catch(() => null));
+
+  rememberStatusMessage(interaction.guildId, message, interaction.client, undefined, musicService);
+  return message;
+}
+
 function handleNowPlaying(interaction, _ctx, musicService) {
   if (!ensureSameVoiceChannel(interaction)) return;
   const res = getNowPlayingSafe(musicService, interaction.guildId);
@@ -581,6 +616,7 @@ const slashHandlers = {
   pause: handlePause,
   resume: handleResume,
   stop: handleStop,
+  volume: handleVolume,
   nowplaying: handleNowPlaying,
 };
 
@@ -743,6 +779,7 @@ export function setupInteractionHandler(client, musicService) {
     "pause",
     "resume",
     "stop",
+    "volume",
     "getQueueSnapshot",
     "getNowPlaying",
     "completeSearchSelection",

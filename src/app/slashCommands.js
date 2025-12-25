@@ -51,6 +51,18 @@ export const slashCommands = [
     .setDescription("Stoppt die Wiedergabe und leert die Queue"),
 
   new SlashCommandBuilder()
+    .setName("volume")
+    .setDescription("Setzt die Lautstärke")
+    .addIntegerOption((o) =>
+      o
+        .setName("value")
+        .setDescription("Lautstärke in Prozent (0-100)")
+        .setMinValue(0)
+        .setMaxValue(100)
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName("nowplaying")
     .setDescription("Zeigt den aktuell laufenden Track"),
 ].map((c) => c.toJSON());
