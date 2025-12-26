@@ -38,3 +38,8 @@ export const HEALTH_PORT = Number(env("HEALTH_PORT", 0));
 export const PLAYLIST_MAX_TRACKS = Number(env("PLAYLIST_MAX_TRACKS", 200));
 export const AUTO_DJ = env("AUTO_DJ", "false").toLowerCase() === "true";
 export const AUTO_DJ_MAX_TRACKS = Number(env("AUTO_DJ_MAX_TRACKS", 5));
+
+// --- Bot status reporting ---
+export const BOT_STATUS_URL = env("BOT_STATUS_URL", "");
+export const BOT_STATUS_TOKEN = env("BOT_STATUS_TOKEN", "");
+export const BOT_STATUS_INTERVAL_MS = Number(env("BOT_STATUS_INTERVAL_MS", 15000));

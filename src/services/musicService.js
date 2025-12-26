@@ -1157,6 +1157,59 @@ export function createMusicService(shoukaku, client) {
       };
     },
 
+
+    /** Status Snapshot fuer Website-Reporting. */
+    getStatusSnapshot() {
+      const guildIds = client?.guilds?.cache ? [...client.guilds.cache.keys()] : [];
+      const ids = new Set([...guildIds, ...queues.keys(), ...nowPlaying.keys(), ...botVoiceChannels.keys()]);
+      const guilds = [];
+
+      const buildTrackInfo = (info) => {
+        if (!info) return null;
+        const title = info?.title?.trim() || "Unbekannt";
+        const author = info?.author?.trim() || null;
+        const durationMs = info?.length ?? info?.duration ?? info?.lengthMs ?? null;
+        const uri = info?.uri || info?.url || info?.sourceUri || null;
+        const artworkUrl = findArtwork(info);
+        return { title, author, durationMs, uri, artworkUrl };
+      };
+
+      for (const guildId of ids) {
+        const q = queues.get(guildId);
+        const player = getExistingPlayer(shoukaku, guildId);
+        const isPlaying = nowPlaying.has(guildId);
+        const info = isPlaying ? lastPlayedInfo.get(guildId) || extractInfo(player?.track) : null;
+        const nowPlayingTrack = info ? buildTrackInfo(info) : null;
+        const queueItems = (q?.items || [])
+          .map((item) => buildTrackInfo(item?.info))
+          .filter(Boolean);
+        const positionMs = typeof player?.position === "number" ? player.position : null;
+
+        const guildName = client?.guilds?.cache?.get(guildId)?.name || null;
+        guilds.push({
+          guildId,
+          guildName,
+          nowPlaying: nowPlayingTrack,
+          nowPlayingText: nowPlayingTrack?.title || null,
+          queue: queueItems,
+          queueLength: queueItems.length,
+          playing: isPlaying,
+          paused: player?.paused === true,
+          positionMs,
+          voiceChannelId: getBotVoiceChannelId(client, guildId),
+        });
+      }
+
+      return {
+        guilds,
+        totals: {
+          guilds: ids.size,
+          nowPlaying: nowPlaying.size,
+          queues: queues.size,
+        },
+      };
+    },
+
     setAutoDj({ guildId, enabled }) {
       if (enabled && !AUTO_DJ) {
         return { ok: false, reason: "AUTO_DJ_DISABLED" };

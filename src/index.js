@@ -3,7 +3,17 @@
 // verdrahtet Event-Handler und stößt die Registrierung der Slash-Commands an.
 import { Events } from "discord.js";
 
-import { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, LAVALINK, LOG_LEVEL, HEALTH_PORT } from "./config/index.js";
+import {
+  DISCORD_TOKEN,
+  CLIENT_ID,
+  GUILD_ID,
+  LAVALINK,
+  LOG_LEVEL,
+  HEALTH_PORT,
+  BOT_STATUS_URL,
+  BOT_STATUS_TOKEN,
+  BOT_STATUS_INTERVAL_MS,
+} from "./config/index.js";
 import { log, errToObj } from "./utils/logger.js";
 
 import { createDiscordClient } from "./infra/discord/client.js";
@@ -13,6 +23,7 @@ import { startHealthServer } from "./infra/health/server.js";
 import { createMusicService } from "./services/musicService.js";
 import { registerSlashCommands } from "./app/registerCommands.js";
 import { setupInteractionHandler } from "./app/interactionHandler.js";
+import { startStatusReporter } from "./infra/status/sender.js";
 
 // --- Process-level logging ---
 // Sicherheitsnetz, damit ungefangene Fehler nicht untergehen und sauber
@@ -49,6 +60,12 @@ const client = createDiscordClient();
 const shoukaku = createShoukaku(client);
 const musicService = createMusicService(shoukaku, client);
 startHealthServer({ port: HEALTH_PORT, getSnapshot: () => musicService.getHealthSnapshot() });
+startStatusReporter({
+  url: BOT_STATUS_URL,
+  token: BOT_STATUS_TOKEN,
+  intervalMs: BOT_STATUS_INTERVAL_MS,
+  getSnapshot: () => musicService.getStatusSnapshot(),
+});
 
 // --- Wire handlers ---
 // Slash-Command-Handler mit Discord-Client und Music-Service verbinden.
